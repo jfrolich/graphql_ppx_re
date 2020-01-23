@@ -40,7 +40,7 @@ jobs:
         uses: actions/cache@v1
         with:
           path: ${{ steps.esy_cache_path.outputs.path }}
-          key: v1-esy-${{ matrix.os }}-${{ hashFiles('**/index.json') }}
+          key: v1-esy-${{ matrix.os }}-${{ hashFiles('**/esy.json') }}
           restore-keys: |
             v1-esy-${{ matrix.os }}-
       - name: install-build
@@ -69,7 +69,7 @@ jobs:
     strategy:
       matrix:
         node-version: [12.x]
-        os: [macOS-latest, "windows-latest"]
+        os: [windows-latest, macOS-latest]
     steps:
       - uses: actions/checkout@v1
       - name: Use Node.js ${{ matrix.node-version }}
@@ -102,7 +102,7 @@ jobs:
         uses: actions/cache@v1
         with:
           path: ${{ steps.esy_cache_path.outputs.path }}
-          key: v1-esy-${{ matrix.os }}-${{ hashFiles('**/index.json') }}
+          key: v1-esy-${{ matrix.os }}-${{ hashFiles('**/esy.json') }}
           restore-keys: |
             v1-esy-${{ matrix.os }}-
       - name: install-build
@@ -161,6 +161,7 @@ jobs:
         run: |
           mkdir -p bin/bsb6
           mv binaries/darwin/bin.exe bin/bsb6/graphql_ppx-darwin-x64.exe
+          mv binaries/windows/bin.exe bin/bsb6/graphql_ppx-win-x64.exe
           mv binaries/linux/bin.exe bin/bsb6/graphql_ppx-linux-x64.exe
       - name: Publish
         if: success()
