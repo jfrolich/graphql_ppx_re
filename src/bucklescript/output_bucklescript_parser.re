@@ -158,7 +158,7 @@ let generate_error = (loc, message) => {
   Ast_helper.Exp.extension(~loc, ext);
 };
 
-let rec generate_decoder = config =>
+let rec generate_parser = config =>
   fun
   | Res_nullable(loc, inner) =>
     lean_parse()
@@ -190,11 +190,9 @@ let rec generate_decoder = config =>
   | Res_custom_decoder(loc, ident, inner) =>
     generate_custom_decoder(config, conv_loc(loc), ident, inner)
   | Res_record(loc, name, fields) =>
-    generate_record_decoder(config, conv_loc(loc), name, fields)
+    generate_object_decoder(config, conv_loc(loc), name, fields)
   | Res_object(loc, name, fields) =>
     generate_object_decoder(config, conv_loc(loc), name, fields)
-  | Res_poly_variant_selection_set(loc, name, fields) =>
-    generate_poly_variant_selection_set(config, conv_loc(loc), name, fields)
   | Res_poly_variant_union(loc, name, fragments, exhaustive) =>
     generate_poly_variant_union(
       config,
@@ -218,7 +216,7 @@ and generate_nullable_decoder_lean = (config, loc, inner) =>
   [@metaloc loc]
   (
     switch%expr (Js.toOption(Obj.magic(value): Js.Nullable.t('a))) {
-    | Some(_) => Some([%e generate_decoder(config, inner)])
+    | Some(_) => Some([%e generate_parser(config, inner)])
     | None => None
     }
     // (Obj.magic(value): Js.Nullable.t('a)) == Js.Nullable.null
@@ -228,7 +226,7 @@ and generate_nullable_decoder = (config, loc, inner) =>
   [@metaloc loc]
   (
     switch%expr (Js.Json.decodeNull(value)) {
-    | None => Some([%e generate_decoder(config, inner)])
+    | None => Some([%e generate_parser(config, inner)])
     | Some(_) => None
     }
   )
@@ -240,7 +238,7 @@ and generate_array_decoder = (config, loc, inner) =>
     |> Js.Option.getExn
     |> Js.Array.map(value => {
          %e
-         generate_decoder(config, inner)
+         generate_parser(config, inner)
        })
   ]
 and generate_array_decoder_lean = (config, loc, inner) =>
@@ -249,346 +247,77 @@ and generate_array_decoder_lean = (config, loc, inner) =>
     Obj.magic(value)
     |> Js.Array.map(value => {
          %e
-         generate_decoder(config, inner)
+         generate_parser(config, inner)
        })
   ]
 and generate_custom_decoder = (config, loc, ident, inner) => {
   let fn_expr =
     Ast_helper.(
-      Exp.ident({loc: Location.none, txt: Longident.parse(ident)})
+      Exp.ident({
+        loc: Location.none,
+        txt: Longident.parse(ident ++ ".parse"),
+      })
     );
-  [@metaloc loc] [%expr [%e fn_expr]([%e generate_decoder(config, inner)])];
-}
-and generate_record_decoder = (config, loc, name, fields) => {
-  /*
-     Given a selection set, this function first generates the resolvers,
-     binding the results to individual local variables. It then generates
-     a record containing each field bound to the corresponding variable.
-
-     While this might seem a bit convoluted, it lets us wrap the record in
-     a [%bs.obj ] extension to generate a JavaScript object without having
-     to worry about the record-in-javascript-object problem that BuckleScript has.
-
-     As an example, a selection set like "{ f1 f2 f3 }" will result in
-     let (field_f1, field_f2, field_f3) = (
-       match Js.Dict.get value "f1" with ... end
-       match Js.Dict.get value "f2" with ... end
-       match Js.Dict.get value "f3" with ... end
-     ) in { f1 = field_f1; f2 = field_f2; f3 = field_f3 }
-   */
-
-  let field_name_tuple_pattern =
-    Ast_helper.(
-      fields
-      |> filter_map(
-           fun
-           | Fr_named_field(field, _, _) =>
-             Some(Pat.var({loc, txt: "field_" ++ field}))
-           | Fr_fragment_spread(_) => None,
-         )
-      |> (
-        fun
-        | [field_pattern] => field_pattern
-        | field_patterns => Pat.tuple(field_patterns)
-      )
-    );
-
-  let field_decoder_tuple =
-    Ast_helper.(
-      fields
-      |> filter_map(
-           fun
-           | Fr_named_field(field, loc, inner) => {
-               let loc = conv_loc(loc);
-               [@metaloc loc]
-               Some(
-                 switch%expr (Js.Dict.get(value, [%e const_str_expr(field)])) {
-                 | Some(value) =>
-                   %e
-                   generate_decoder(config, inner)
-                 | None =>
-                   if%e (can_be_absent_as_field(inner)) {
-                     %expr
-                     None;
-                   } else {
-                     make_error_raiser(
-                       [%expr
-                         "Field "
-                         ++ [%e const_str_expr(field)]
-                         ++ " on type "
-                         ++ [%e const_str_expr(name)]
-                         ++ " is missing"
-                       ],
-                     );
-                   }
-                 },
-               );
-             }
-           | Fr_fragment_spread(_) => None,
-         )
-      |> (
-        fun
-        | [field_decoder] => field_decoder
-        | field_decoders => Exp.tuple(field_decoders)
-      )
-    );
-
-  let record_fields =
-    Ast_helper.(
-      fields
-      |> List.map(
-           fun
-           | Fr_named_field(field, loc, _) => {
-               let loc = conv_loc(loc);
-               (
-                 {Location.loc, txt: Longident.Lident(field)},
-                 Exp.ident(
-                   ~loc,
-                   {loc, txt: Longident.Lident("field_" ++ field)},
-                 ),
-               );
-             }
-           | Fr_fragment_spread(field, loc, name) => {
-               let loc = conv_loc(loc);
-               (
-                 {Location.loc, txt: Longident.Lident(field)},
-                 [@metaloc loc]
-                 {
-                   let%expr value = Js.Json.object_(value);
-                   %e
-                   generate_solo_fragment_spread(loc, name);
-                 },
-               );
-             },
-         )
-    );
-  let record = Ast_helper.Exp.record(~loc, record_fields, None);
-
-  switch%expr (Js.Json.decodeObject(value)) {
-  | None =>
-    %e
-    make_error_raiser(
-      [%expr
-        "Expected object of type "
-        ++ [%e const_str_expr(name)]
-        ++ ", got "
-        ++ Js.Json.stringify(value)
-      ],
-    )
-  | Some(value) =>
-    let [%p field_name_tuple_pattern] = [%e field_decoder_tuple];
-    %e
-    record;
-  };
+  [@metaloc loc] [%expr [%e fn_expr]([%e generate_parser(config, inner)])];
 }
 and generate_object_decoder = (config, loc, name, fields) => {
-  let ctor_result_type =
-    fields
-    |> List.mapi(
-         (i, Fr_named_field(key, _, _) | Fr_fragment_spread(key, _, _)) =>
-         Otag(
-           {txt: key, loc},
-           [],
-           Ast_helper.Typ.var("a" ++ string_of_int(i)),
-         )
-       );
-
   let rec do_obj_constructor = () => {
-    Ast_helper.Exp.letmodule(
-      {txt: "GQL", loc: Location.none},
-      Ast_helper.Mod.structure([
-        Ast_helper.Str.primitive({
-          pval_name: {
-            txt: "make_obj",
-            loc: Location.none,
-          },
-          pval_type: make_obj_constructor_fn(0, fields),
-          pval_prim: [""],
-          pval_attributes: [
-            ({txt: "bs.obj", loc: Location.none}, PStr([])),
-          ],
-          pval_loc: Location.none,
-        }),
-      ]),
-      Ast_helper.Exp.apply(
-        Ast_helper.Exp.ident({
-          txt: Longident.parse("GQL.make_obj"),
-          loc: Location.none,
-        }),
-        List.append(
-          fields
-          |> List.map(
-               fun
-               | Fr_named_field(key, _, inner) => (
-                   Labelled(key),
-                   switch%expr (Js.Dict.get(value, [%e const_str_expr(key)])) {
-                   | Some(value) =>
-                     %e
-                     generate_decoder(config, inner)
-                   | None =>
-                     if%e (can_be_absent_as_field(inner)) {
-                       %expr
-                       None;
-                     } else {
-                       make_error_raiser(
-                         [%expr
-                           "Field "
-                           ++ [%e const_str_expr(key)]
-                           ++ " on type "
-                           ++ [%e const_str_expr(name)]
-                           ++ " is missing"
-                         ],
-                       );
-                     }
-                   },
-                 )
-               | Fr_fragment_spread(key, loc, name) => {
-                   let loc = conv_loc(loc);
-                   (
-                     Labelled(key),
-                     {
-                       let%expr value = Js.Json.object_(value);
-                       %e
-                       generate_solo_fragment_spread(loc, name);
-                     },
-                   );
-                 },
-             ),
-          [
-            (
-              Nolabel,
-              Ast_helper.Exp.construct(
-                {txt: Longident.Lident("()"), loc: Location.none},
-                None,
-              ),
-            ),
-          ],
-        ),
-      ),
+    Ast_406.(
+      Ast_helper.(
+        Exp.extension((
+          {txt: "bs.obj", loc},
+          PStr([[%stri [%e do_obj_constructor_lean()]]]),
+        ))
+      )
     );
   }
   and do_obj_constructor_lean = () => {
-    Ast_helper.Exp.letmodule(
-      {txt: "GQL", loc: Location.none},
-      Ast_helper.Mod.structure([
-        Ast_helper.Str.primitive({
-          pval_name: {
-            txt: "make_obj",
-            loc: Location.none,
-          },
-          pval_type: make_obj_constructor_fn(0, fields),
-          pval_prim: [""],
-          pval_attributes: [
-            ({txt: "bs.obj", loc: Location.none}, PStr([])),
-          ],
-          pval_loc: Location.none,
-        }),
-      ]),
-      Ast_helper.Exp.apply(
-        Ast_helper.Exp.ident({
-          txt: Longident.parse("GQL.make_obj"),
-          loc: Location.none,
-        }),
-        List.append(
-          fields
-          |> List.map(
-               fun
-               | Fr_named_field(key, _, inner) => (
-                   Labelled(key),
-                   {
-                     let%expr value: 'a =
-                       Obj.magic(
-                         Js.Dict.unsafeGet(value, [%e const_str_expr(key)]): 'a,
-                       );
-
-                     %e
-                     generate_decoder(config, inner);
-                   },
-                 )
-               //  | Fr_named_field(key, _, Res_nullable(inner)) => (
-               //      Labelled(key),
-               //      {
-               //        //  if (can_be_absent_as_field(inner)) {
-               //        //    switch%expr (
-               //        //      Js.Dict.get(value, [%e const_str_expr(key)])
-               //        //    ) {
-               //        //    | Some(value) =>
-               //        //      %e
-               //        //      generate_decoder(config, inner)
-               //        //    | None => None
-               //        //    };
-               //        //  } else {
-               //        let%expr value: 'a =
-               //          Obj.magic(
-               //            Js.Dict.get(value, [%e const_str_expr(key)]):
-               //                                                       option(
-               //                                                       'a,
-               //                                                       ),
-               //          );
-               //        %e
-               //        generate_decoder(config, inner);
-               //      },
-               //    )
-               | Fr_fragment_spread(key, loc, name) => {
-                   let loc = conv_loc(loc);
-                   (
-                     Labelled(key),
-                     {
-                       let%expr value = Js.Json.object_(value);
-                       %e
-                       generate_solo_fragment_spread(loc, name);
-                     },
+    Ast_helper.Exp.record(
+      fields
+      |> List.map(
+           fun
+           | Fr_named_field(key, _, inner) => (
+               {Location.txt: Longident.parse(key), loc},
+               {
+                 let%expr value =
+                   Js.Dict.unsafeGet(
+                     Obj.magic(value),
+                     [%e const_str_expr(key)],
                    );
-                 },
+
+                 %e
+                 generate_parser(config, inner);
+               },
+             )
+           | Fr_fragment_spread(key, loc, name, _) => (
+               {Location.txt: Longident.parse(key), loc: conv_loc(loc)},
+               {
+                 let ident =
+                   Ast_helper.Exp.ident({
+                     loc: conv_loc(loc),
+                     txt: Longident.parse(name ++ ".parse"),
+                   });
+                 %expr
+                 [%e ident](Obj.magic(value));
+               },
              ),
-          [
-            (
-              Nolabel,
-              Ast_helper.Exp.construct(
-                {txt: Longident.Lident("()"), loc: Location.none},
-                None,
-              ),
-            ),
-          ],
-        ),
-      ),
+         ),
+      None,
     );
   }
-
   and obj_constructor = () => {
     [@metaloc loc]
     let%expr value = value |> Js.Json.decodeObject |> Js.Option.getExn;
     %e
     do_obj_constructor();
   }
-  and obj_constructor_lean = () => {
+  and obj_constructor_lean = () =>
     [@metaloc loc]
-    let%expr value: Js.Dict.t(Js.Json.t) = Obj.magic(value: Js.Json.t);
-    %e
-    do_obj_constructor_lean();
-  }
-  and make_obj_constructor_fn = i =>
-    fun
-    | [] =>
-      Ast_helper.Typ.arrow(
-        Nolabel,
-        Ast_helper.Typ.constr(
-          {txt: Longident.Lident("unit"), loc: Location.none},
-          [],
-        ),
-        Ast_helper.Typ.constr(
-          {txt: Longident.parse("Js.t"), loc: Location.none},
-          [Ast_helper.Typ.object_(ctor_result_type, Closed)],
-        ),
-      )
-    | [Fr_fragment_spread(key, _, _), ...next]
-    | [Fr_named_field(key, _, _), ...next] =>
-      Ast_helper.Typ.arrow(
-        Labelled(key),
-        Ast_helper.Typ.var("a" ++ string_of_int(i)),
-        make_obj_constructor_fn(i + 1, next),
-      );
-  lean_parse() ? obj_constructor_lean() : obj_constructor();
+    {
+      do_obj_constructor_lean();
+    };
+
+  config.records ? obj_constructor_lean() : obj_constructor();
 }
 and generate_poly_variant_selection_set = (config, loc, name, fields) => {
   let rec generator_loop =
@@ -598,7 +327,7 @@ and generate_poly_variant_selection_set = (config, loc, name, fields) => {
           Ast_helper.(
             Exp.variant(
               Compat.capitalize_ascii(field),
-              Some(generate_decoder(config, inner)),
+              Some(generate_parser(config, inner)),
             )
           );
         switch%expr (Js.Dict.get(value, [%e const_str_expr(field)])) {
@@ -633,6 +362,7 @@ and generate_poly_variant_selection_set = (config, loc, name, fields) => {
           ++ " were null"
         ],
       );
+
   let variant_type =
     Ast_helper.(
       Typ.variant(
@@ -674,7 +404,7 @@ and generate_poly_variant_interface = (config, loc, name, base, fragments) => {
     open Ast_helper;
     let name_pattern = Pat.any();
 
-    Exp.variant(type_name, Some(generate_decoder(config, inner)))
+    Exp.variant(type_name, Some(generate_parser(config, inner)))
     |> Exp.case(name_pattern);
   };
 
@@ -682,7 +412,7 @@ and generate_poly_variant_interface = (config, loc, name, base, fragments) => {
     open Ast_helper;
     let name_pattern = Pat.constant(Pconst_string(type_name, None));
 
-    Exp.variant(type_name, Some(generate_decoder(config, inner)))
+    Exp.variant(type_name, Some(generate_parser(config, inner)))
     |> Exp.case(name_pattern);
   };
   let map_case_ty = ((name, _)) =>
@@ -758,7 +488,7 @@ and generate_poly_variant_union =
       |> List.map(((type_name, inner)) => {
            let name_pattern = Pat.constant(Pconst_string(type_name, None));
            Ast_helper.(
-             Exp.variant(type_name, Some(generate_decoder(config, inner)))
+             Exp.variant(type_name, Some(generate_parser(config, inner)))
            )
            |> Exp.case(name_pattern);
          })

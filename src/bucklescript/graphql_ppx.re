@@ -39,6 +39,8 @@ let fmt_lex_err = err =>
     }
   );
 
+let global_records = () => Ppx_config.records();
+
 let fmt_parse_err = err =>
   Graphql_parser.(
     switch (err) {
@@ -56,7 +58,7 @@ let make_error_expr = (loc, message) => {
   );
 };
 
-let rewrite_query = (~template_literal=?, ~schema=?, ~loc, ~delim, ~query, ()) => {
+let rewrite_query = (~template_literal=?, ~records=?, ~schema=?, ~loc, ~delim, ~query, ()) => {
   open Ast_406;
   open Ast_helper;
   open Parsetree;
@@ -93,6 +95,11 @@ let rewrite_query = (~template_literal=?, ~schema=?, ~loc, ~delim, ~query, ()) =
         Generator_utils.map_loc: add_loc(delimLength, loc),
         delimiter: delim,
         full_document: document,
+        records:
+          switch (records) {
+          | Some(value) => value
+          | None => global_records()
+          },
         /*  the only call site of schema, make it lazy! */
         schema: Lazy.force(Read_schema.get_schema(schema)),
         template_literal,
@@ -145,6 +152,48 @@ let extract_schema_from_config = config_fields => {
   switch (maybe_schema_field) {
   | Some((_, {pexp_desc: Pexp_constant(Pconst_string(schema_name, _)), _})) =>
     Some(schema_name)
+  | _ => None
+  };
+};
+
+let extract_records_from_config = config_fields => {
+  open Ast_406;
+  open Asttypes;
+  open Parsetree;
+
+  let maybe_records_field =
+    try(
+      Some(
+        List.find(
+          config_field =>
+            switch (config_field) {
+            | (
+                {txt: Longident.Lident("records"), _},
+                {
+                  pexp_desc:
+                    Pexp_construct({txt: Longident.Lident(_value)}, _),
+                  _,
+                },
+              ) =>
+              true
+            | _ => false
+            },
+          config_fields,
+        ),
+      )
+    ) {
+    | _ => None
+    };
+
+  switch (maybe_records_field) {
+  | Some((
+      _,
+      {pexp_desc: Pexp_construct({txt: Longident.Lident(value)}, _), _},
+    )) =>
+    switch (value) {
+    | "true" => Some(true)
+    | _ => Some(false)
+    }
   | _ => None
   };
 };
@@ -209,7 +258,8 @@ let () =
         let loc = conv_loc(loc);
         raise(Location.Error(Location.error(~loc, message)));
       },
-      lean_parse: false,
+      lean_parse: true,
+      records: false,
     })
   );
 
@@ -253,6 +303,7 @@ let mapper = (_config, _cookies) => {
                 rewrite_query(
                   ~schema=?maybe_schema,
                   ~template_literal=?maybe_template_literal,
+                  ~records=?extract_records_from_config(fields),
                   ~loc=conv_loc_from_ast(loc),
                   ~delim,
                   ~query,
@@ -354,6 +405,13 @@ let args = [
         Ppx_config.update_config(current => {...current, lean_parse: true}),
     ),
     "A leaner parse function (experimental)",
+  ),
+  (
+    "-records",
+    Arg.Unit(
+      () => Ppx_config.update_config(current => {...current, records: true}),
+    ),
+    "Compile to records instead of objects (experimental)",
   ),
 ];
 

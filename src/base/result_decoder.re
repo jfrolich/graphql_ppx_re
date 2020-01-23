@@ -256,107 +256,10 @@ and unify_union = (error_marker, config, span, union_meta, selection_set) =>
       },
     );
   }
-and unify_variant = (error_marker, config, span, ty, selection_set) =>
-  switch (ty) {
-  | Ntr_nullable(t) =>
-    Res_nullable(
-      config.map_loc(span),
-      unify_variant(error_marker, config, span, t, selection_set),
-    )
-  | Ntr_list(t) =>
-    Res_array(
-      config.map_loc(span),
-      unify_variant(error_marker, config, span, t, selection_set),
-    )
-  | Ntr_named(n) =>
-    switch (lookup_type(config.schema, n)) {
-    | None =>
-      make_error(
-        error_marker,
-        config.map_loc,
-        span,
-        "Could not find type " ++ n,
-      )
-    | Some(Scalar(_))
-    | Some(Enum(_))
-    | Some(Interface(_))
-    | Some(Union(_))
-    | Some(InputObject(_)) =>
-      make_error(
-        error_marker,
-        config.map_loc,
-        span,
-        "Variant fields can only be applied to object types",
-      )
-    | Some(Object(_) as ty) =>
-      switch (selection_set) {
-      | None =>
-        make_error(
-          error_marker,
-          config.map_loc,
-          span,
-          "Variant fields need a selection set",
-        )
-      | Some({item, _}) =>
-        let fields =
-          item
-          |> List.map(selection =>
-               switch (selection) {
-               | Field({item, _}) =>
-                 switch (lookup_field(ty, item.fd_name.item)) {
-                 | None =>
-                   raise_error(
-                     config.map_loc,
-                     span,
-                     "Unknown field on type " ++ type_name(ty),
-                   )
-                 | Some(field_meta) =>
-                   let key = some_or(item.fd_alias, item.fd_name).item;
-                   let inner_type =
-                     switch (to_native_type_ref(field_meta.fm_field_type)) {
-                     | Ntr_list(_)
-                     | Ntr_named(_) =>
-                       raise_error(
-                         config.map_loc,
-                         span,
-                         "Variant field must only contain nullable fields",
-                       )
-                     | Ntr_nullable(i) => i
-                     };
-                   (
-                     key,
-                     unify_type(
-                       error_marker,
-                       false,
-                       config,
-                       span,
-                       inner_type,
-                       item.fd_selection_set,
-                     ),
-                   );
-                 }
-               | FragmentSpread({span, _}) =>
-                 raise_error(
-                   config.map_loc,
-                   span,
-                   "Variant selections can only contain fields",
-                 )
-               | InlineFragment({span, _}) =>
-                 raise_error(
-                   config.map_loc,
-                   span,
-                   "Variant selections can only contain fields",
-                 )
-               }
-             );
-
-        Res_poly_variant_selection_set(config.map_loc(span), n, fields);
-      }
-    }
-  }
 and unify_field = (error_marker, config, field_span, ty) => {
   let ast_field = field_span.item;
-  let field_meta = lookup_field(ty, ast_field.fd_name.item);
+  let field_name = ast_field.fd_name.item;
+  let field_meta = lookup_field(ty, field_name);
   let key = some_or(ast_field.fd_alias, ast_field.fd_name).item;
   let is_variant = has_directive("bsVariant", ast_field.fd_directives);
   let is_record = has_directive("bsRecord", ast_field.fd_directives);
@@ -365,7 +268,11 @@ and unify_field = (error_marker, config, field_span, ty) => {
     || has_directive("include", ast_field.fd_directives);
   let sub_unifier =
     if (is_variant) {
-      unify_variant(error_marker);
+      raise_error(
+        config.map_loc,
+        field_span.span,
+        "Non-union variant conversion not supported anymore",
+      );
     } else {
       unify_type(error_marker, is_record);
     };
@@ -377,7 +284,7 @@ and unify_field = (error_marker, config, field_span, ty) => {
         error_marker,
         config.map_loc,
         field_span.span,
-        "Unknown field on type " ++ type_name(ty),
+        "Unknown field '" ++ field_name ++ "' on type " ++ type_name(ty),
       )
     | Some(field_meta) =>
       let field_ty = to_native_type_ref(field_meta.fm_field_type);
@@ -396,10 +303,10 @@ and unify_field = (error_marker, config, field_span, ty) => {
     };
 
   let loc = config.map_loc(field_span.span);
-  switch (ast_field.fd_directives |> find_directive("bsDecoder")) {
+  switch (ast_field.fd_directives |> find_directive("decoder")) {
   | None => Fr_named_field(key, loc, parser_expr)
   | Some({item: {d_arguments, _}, span}) =>
-    switch (find_argument("fn", d_arguments)) {
+    switch (find_argument("module", d_arguments)) {
     | None =>
       Fr_named_field(
         key,
@@ -408,14 +315,14 @@ and unify_field = (error_marker, config, field_span, ty) => {
           error_marker,
           config.map_loc,
           span,
-          "bsDecoder must be given 'fn' argument",
+          "decoder must be given 'module' argument",
         ),
       )
-    | Some((_, {item: Iv_string(fn_name), span})) =>
+    | Some((_, {item: Iv_string(module_name), span})) =>
       Fr_named_field(
         key,
         loc,
-        Res_custom_decoder(config.map_loc(span), fn_name, parser_expr),
+        Res_custom_decoder(config.map_loc(span), module_name, parser_expr),
       )
     | Some((_, {span, _})) =>
       Fr_named_field(
@@ -437,11 +344,21 @@ and unify_selection = (error_marker, config, ty, selection) =>
   | FragmentSpread({item: {fs_directives, fs_name}, span}) =>
     switch (find_directive("bsField", fs_directives)) {
     | None =>
-      raise_error(
-        config.map_loc,
-        span,
-        "You must use @bsField(name: \"fieldName\") to use fragment spreads",
-      )
+      let key =
+        fs_name.item
+        |> String.split_on_char('.')
+        |> List.rev
+        |> List.hd
+        |> String.uncapitalize_ascii;
+      Fr_fragment_spread(
+        key,
+        config.map_loc(span),
+        fs_name.item,
+        switch (ty) {
+        | Object({om_name}) => Some(om_name)
+        | _ => None
+        },
+      );
     | Some({item: {d_arguments, _}, span}) =>
       switch (find_argument("name", d_arguments)) {
       | None =>
@@ -451,7 +368,15 @@ and unify_selection = (error_marker, config, ty, selection) =>
           "bsField must be given 'name' argument",
         )
       | Some((_, {item: Iv_string(key), span})) =>
-        Fr_fragment_spread(key, config.map_loc(span), fs_name.item)
+        Fr_fragment_spread(
+          key,
+          config.map_loc(span),
+          fs_name.item,
+          switch (ty) {
+          | Object({om_name}) => Some(om_name)
+          | _ => None
+          },
+        )
       | Some(_) =>
         raise_error(
           config.map_loc,

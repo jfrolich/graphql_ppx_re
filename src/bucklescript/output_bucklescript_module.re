@@ -6,6 +6,7 @@ open Ast_406;
 open Asttypes;
 open Parsetree;
 open Ast_helper;
+open Extract_type_definitions;
 
 module StringSet = Set.Make(String);
 module VariableFinderImpl = {
@@ -27,21 +28,14 @@ let find_variables = (config, document) => {
   VariableFinderImpl.from_self(VariableFinder.visit_document(ctx, document));
 };
 
-let ret_type_magic = [
-  /* Some functor magic to determine the return type of parse */
-  [%stri module type mt_ret = {type t;}],
-  [%stri type typed_ret('a) = (module mt_ret with type t = 'a)],
-  [%stri
-    let ret_type = (type a, f: _ => a): typed_ret(a) => {
-      module MT_Ret = {
-        type t = a;
-      };
-      (module MT_Ret);
-    }
-  ],
-  [%stri module MT_Ret = (val ret_type(parse))],
-  [%stri type t = MT_Ret.t],
-];
+let join = (part1, part2) => {
+  Ast_helper.(
+    Exp.apply(
+      Exp.ident({Location.txt: Longident.parse("^"), loc: Location.none}),
+      [(Nolabel, part1), (Nolabel, part2)],
+    )
+  );
+};
 
 // port of split_on_char from the stdlib because it was only introduced
 // in ocaml 4.04
@@ -104,83 +98,40 @@ let compress_parts = (parts: array(Graphql_printer.t)) => {
 
 let emit_printed_query = (~strProcess=?, parts) => {
   open Ast_406;
+  let make_string = s => {
+    Exp.constant(Parsetree.Pconst_string(s, None));
+  };
+  let make_fragment_name = f => {
+    Exp.ident({
+      Location.txt: Longident.parse(f ++ ".name"),
+      loc: Location.none,
+    });
+  };
+  let make_fragment_query = f => {
+    Exp.ident({
+      Location.txt: Longident.parse(f ++ ".query"),
+      loc: Location.none,
+    });
+  };
   open Graphql_printer;
-  let generate_expr = acc =>
-    fun
-    | Empty => acc
-    | String(s) =>
-      Ast_helper.(
-        Exp.apply(
-          Exp.ident({
-            Location.txt: Longident.parse("^"),
-            loc: Location.none,
-          }),
-          [
-            (Nolabel, acc),
-            (Nolabel, Exp.constant(Parsetree.Pconst_string(s, None))),
-          ],
-        )
-      )
-    | FragmentNameRef(f) =>
-      Ast_helper.(
-        Exp.apply(
-          Exp.ident({
-            Location.txt: Longident.parse("^"),
-            loc: Location.none,
-          }),
-          [
-            (Nolabel, acc),
-            (
-              Nolabel,
-              Exp.ident({
-                Location.txt: Longident.parse(f ++ ".name"),
-                loc: Location.none,
-              }),
-            ),
-          ],
-        )
-      )
-    | FragmentQueryRef(f) =>
-      Ast_helper.(
-        Exp.apply(
-          Exp.ident({
-            Location.txt: Longident.parse("^"),
-            loc: Location.none,
-          }),
-          [
-            (Nolabel, acc),
-            (
-              Nolabel,
-              Exp.ident({
-                Location.txt: Longident.parse(f ++ ".query"),
-                loc: Location.none,
-              }),
-            ),
-          ],
-        )
-      );
+  let generate_expr = (acc, part) =>
+    switch (acc, part) {
+    | (acc, Empty) => acc
+    | (None, String(s)) => Some(make_string(s))
+    | (Some(acc), String(s)) => Some(join(acc, make_string(s)))
+    | (None, FragmentNameRef(f)) => Some(make_fragment_name(f))
+    | (Some(acc), FragmentNameRef(f)) =>
+      Some(join(acc, make_fragment_name(f)))
+    | (None, FragmentQueryRef(f)) => Some(make_fragment_query(f))
+    | (Some(acc), FragmentQueryRef(f)) =>
+      Some(join(acc, make_fragment_query(f)))
+    };
 
-  let parts = compress_parts(parts);
+  let result = parts |> Array.fold_left(generate_expr, None);
 
-  switch (parts) {
-  | [|String(s)|] =>
-    Ast_helper.(
-      Exp.constant(
-        Parsetree.Pconst_string(
-          switch (strProcess) {
-          | None => s
-          | Some(strProcess) => strProcess(pretty_print(s))
-          },
-          None,
-        ),
-      )
-    )
-  | parts =>
-    Array.fold_left(
-      generate_expr,
-      Ast_406.(Ast_helper.Exp.constant(Parsetree.Pconst_string("", None))),
-      parts,
-    )
+  switch (result) {
+  | None => make_string("")
+  | Some(e) => e
   };
 };
 
@@ -259,57 +210,68 @@ let make_printed_query = (config, document) => {
       )
     };
 
-  [
-    [%stri let ppx_printed_query = [%e reprinted]],
-    [%stri let query = ppx_printed_query],
-  ];
+  [[%stri let query = [%e reprinted]]];
 };
 
 let generate_default_operation =
     (config, variable_defs, has_error, operation, res_structure) => {
   let parse_fn =
-    Output_bucklescript_decoder.generate_decoder(config, res_structure);
+    Output_bucklescript_parser.generate_parser(config, res_structure);
+  let types = Output_bucklescript_types.generate_types(config, res_structure);
+  let arg_types =
+    Output_bucklescript_types.generate_arg_types(config, variable_defs);
+  let extracted_args = extract_args(config, variable_defs);
+  let serialize_variable_functions =
+    Output_bucklescript_serializer.generate_serialize_variables(
+      config,
+      extracted_args,
+    );
+
   if (has_error) {
     [[%stri let parse = value => [%e parse_fn]]];
   } else {
-    let (rec_flag, encoders) =
-      Output_bucklescript_encoder.generate_encoders(
+    let variable_constructors =
+      Output_bucklescript_serializer.generate_variable_constructors(
         config,
-        Result_structure.res_loc(res_structure),
-        variable_defs,
+        extracted_args,
       );
-    let (make_fn, make_with_variables_fn, make_variables_fn, definition_tuple) =
-      Output_bucklescript_unifier.make_make_fun(config, variable_defs);
-
     List.concat([
       make_printed_query(config, [Graphql_ast.Operation(operation)]),
       List.concat([
-        [[%stri let parse = value => [%e parse_fn]]],
-        if (rec_flag == Recursive) {
-          [
-            {
-              pstr_desc: Pstr_value(rec_flag, encoders |> Array.to_list),
-              pstr_loc: Location.none,
-            },
-          ];
-        } else {
-          encoders
-          |> Array.map(encoder =>
-               {
-                 pstr_desc: Pstr_value(Nonrecursive, [encoder]),
-                 pstr_loc: Location.none,
-               }
-             )
-          |> Array.to_list;
+        [[%stri type raw_t]],
+        [types],
+        switch (extracted_args) {
+        | [] => []
+        | _ => [arg_types]
+        },
+        [[%stri let parse: Js.Json.t => t = value => [%e parse_fn]]],
+        switch (serialize_variable_functions) {
+        | None => [[%stri let serializeVariables = _ => Js.Json.null]]
+        | Some(f) => [f]
+        },
+        switch (variable_constructors) {
+        | None => [[%stri let makeVar = (~f, ()) => f(Js.Json.null)]]
+        | Some(c) => [c]
         },
         [
-          [%stri let make = [%e make_fn]],
-          [%stri let makeWithVariables = [%e make_with_variables_fn]],
-          [%stri let makeVariables = [%e make_variables_fn]],
-          [%stri let definition = [%e definition_tuple]],
+          [%stri let makeVariables = makeVar(~f=f => f)],
+          [%stri
+            let make =
+              makeVar(~f=variables => {
+                {"query": query, "variables": variables, "parse": parse}
+              })
+          ],
+          [%stri
+            let makeWithVariables = variables => {
+              "query": query,
+              "variables": serializeVariables(variables),
+              "parse": parse,
+            }
+          ],
+          [%stri let definition = (parse, query, makeVar)],
+          // [%stri let definition = [%e definition_tuple]],
         ],
       ]),
-      ret_type_magic,
     ]);
   };
 };
@@ -317,7 +279,8 @@ let generate_default_operation =
 let generate_fragment_module =
     (config, name, _required_variables, has_error, fragment, res_structure) => {
   let parse_fn =
-    Output_bucklescript_decoder.generate_decoder(config, res_structure);
+    Output_bucklescript_parser.generate_parser(config, res_structure);
+  let types = Output_bucklescript_types.generate_types(config, res_structure);
 
   let variable_names =
     find_variables(config, [Graphql_ast.Fragment(fragment)])
@@ -351,14 +314,33 @@ let generate_fragment_module =
       List.concat([
         make_printed_query(config, [Graphql_ast.Fragment(fragment)]),
         [
-          [%stri let parse = value => [%e parse_fn]],
+          types,
+          [%stri type raw_t],
+          Ast_helper.(
+            Str.type_(
+              Recursive,
+              [
+                Type.mk(
+                  ~manifest=
+                    Typ.constr(
+                      {loc: Location.none, txt: Longident.Lident("t")},
+                      [],
+                    ),
+                  {
+                    loc: Location.none,
+                    txt: "t_" ++ fragment.item.fg_type_condition.item,
+                  },
+                ),
+              ],
+            )
+          ),
+          [%stri let parse: Js.Json.t => t = value => [%e parse_fn]],
           [%stri
             let name = [%e
               Ast_helper.Exp.constant(Pconst_string(name, None))
             ]
           ],
         ],
-        ret_type_magic,
       ]);
     };
 

@@ -170,8 +170,6 @@ let rec generate_decoder = config =>
     generate_record_decoder(config, conv_loc(loc), name, fields)
   | Res_object(loc, name, fields) =>
     generate_object_decoder(config, conv_loc(loc), name, fields)
-  | Res_poly_variant_selection_set(loc, name, fields) =>
-    generate_poly_variant_selection_set(config, conv_loc(loc), name, fields)
   | Res_poly_variant_union(loc, name, fragments, exhaustive) =>
     generate_poly_variant_union(
       config,
@@ -308,7 +306,7 @@ and generate_record_decoder = (config, loc, name, fields) => {
                  ),
                );
              }
-           | Fr_fragment_spread(field, loc, name) => {
+           | Fr_fragment_spread(field, loc, name, _) => {
                let loc = conv_loc(loc);
                (
                  {Location.loc, txt: Longident.Lident(field)},
@@ -381,7 +379,7 @@ and generate_object_decoder = (config, loc, name, fields) =>
                     },
                   ),
                 )
-              | Fr_fragment_spread(key, loc, name) => {
+              | Fr_fragment_spread(key, loc, name, _) => {
                   let loc = conv_loc(loc);
                   Cf.method(
                     {txt: key, loc: Location.none},
