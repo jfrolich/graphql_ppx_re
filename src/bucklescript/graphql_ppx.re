@@ -39,6 +39,8 @@ let fmt_lex_err = err =>
     }
   );
 
+let global_records = () => Ppx_config.records();
+
 let fmt_parse_err = err =>
   Graphql_parser.(
     switch (err) {
@@ -56,7 +58,8 @@ let make_error_expr = (loc, message) => {
   );
 };
 
-let rewrite_query = (~schema=?, ~loc, ~delim, ~query, ()) => {
+let rewrite_query =
+    (~template_literal=?, ~records=?, ~schema=?, ~loc, ~delim, ~query, ()) => {
   open Ast_406;
   open Ast_helper;
   open Parsetree;
@@ -93,8 +96,14 @@ let rewrite_query = (~schema=?, ~loc, ~delim, ~query, ()) => {
         Generator_utils.map_loc: add_loc(delimLength, loc),
         delimiter: delim,
         full_document: document,
+        records:
+          switch (records) {
+          | Some(value) => value
+          | None => global_records()
+          },
         /*  the only call site of schema, make it lazy! */
         schema: Lazy.force(Read_schema.get_schema(schema)),
+        template_literal,
       };
       switch (Validations.run_validators(config, document)) {
       | Some(errs) =>
@@ -148,6 +157,89 @@ let extract_schema_from_config = config_fields => {
   };
 };
 
+let extract_records_from_config = config_fields => {
+  open Ast_406;
+  open Asttypes;
+  open Parsetree;
+
+  let maybe_records_field =
+    try(
+      Some(
+        List.find(
+          config_field =>
+            switch (config_field) {
+            | (
+                {txt: Longident.Lident("records"), _},
+                {
+                  pexp_desc:
+                    Pexp_construct({txt: Longident.Lident(_value)}, _),
+                  _,
+                },
+              ) =>
+              true
+            | _ => false
+            },
+          config_fields,
+        ),
+      )
+    ) {
+    | _ => None
+    };
+
+  switch (maybe_records_field) {
+  | Some((
+      _,
+      {pexp_desc: Pexp_construct({txt: Longident.Lident(value)}, _), _},
+    )) =>
+    switch (value) {
+    | "true" => Some(true)
+    | _ => Some(false)
+    }
+  | _ => None
+  };
+};
+
+let extract_template_literal_from_config = config_fields => {
+  open Ast_406;
+  open Asttypes;
+  open Parsetree;
+
+  let maybe_template_literal_field =
+    try(
+      Some(
+        List.find(
+          config_field =>
+            switch (config_field) {
+            | (
+                {txt: Longident.Lident("templateLiteral"), _},
+                {pexp_desc: Pexp_ident({txt: _}), _},
+              ) =>
+              true
+            | _ => false
+            },
+          config_fields,
+        ),
+      )
+    ) {
+    | _ => None
+    };
+
+  switch (maybe_template_literal_field) {
+  // in case it's a single identifier: "graphql"
+  | Some((_, {pexp_desc: Pexp_ident({txt: Longident.Lident(f)})})) =>
+    Some(f)
+  // in case it's a dot identifier: "Gatsby.graphql"
+  // note we only pattern match on a single dot, so FirstModule.Gatsby.graphql
+  // wouldn't work
+  | Some((
+      _,
+      {pexp_desc: Pexp_ident({txt: Ldot(Longident.Lident(m), fn)})},
+    )) =>
+    Some(m ++ "." ++ fn)
+  | _ => None
+  };
+};
+
 // Default configuration
 let () =
   Ppx_config.(
@@ -167,6 +259,8 @@ let () =
         let loc = conv_loc(loc);
         raise(Location.Error(Location.error(~loc, message)));
       },
+      lean_parse: true,
+      records: false,
     })
   );
 
@@ -203,13 +297,19 @@ let mapper = (_config, _cookies) => {
                     _,
                   },
                 ]) =>
+                let maybe_schema = extract_schema_from_config(fields);
+                let maybe_template_literal =
+                  extract_template_literal_from_config(fields);
+
                 rewrite_query(
-                  ~schema=?extract_schema_from_config(fields),
+                  ~schema=?maybe_schema,
+                  ~template_literal=?maybe_template_literal,
+                  ~records=?extract_records_from_config(fields),
                   ~loc=conv_loc_from_ast(loc),
                   ~delim,
                   ~query,
                   (),
-                )
+                );
               | PStr([
                   {
                     pstr_desc:
@@ -298,6 +398,21 @@ let args = [
         ),
     ),
     "Verbose error handling. If not defined NODE_ENV will be used",
+  ),
+  (
+    "-lean-parse",
+    Arg.Unit(
+      () =>
+        Ppx_config.update_config(current => {...current, lean_parse: true}),
+    ),
+    "A leaner parse function (experimental)",
+  ),
+  (
+    "-records",
+    Arg.Unit(
+      () => Ppx_config.update_config(current => {...current, records: true}),
+    ),
+    "Compile to records instead of objects (experimental)",
   ),
 ];
 
