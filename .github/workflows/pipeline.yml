@@ -157,15 +157,11 @@ jobs:
       #   with:
       #     name: windows-latest-bsb6
       #     path: binaries/windows
-      - name: Ls
-        if: success()
-        run: |
-          ls -l binaries/darwin
-          ls -l bin
 
       - name: Move bsb artifacts
         if: success()
         run: |
+          mkdir -p bin/bsb6
           mv binaries/darwin/bin.exe bin/bsb6/graphql_ppx-darwin-x64.exe
           mv binaries/linux/bin.exe bin/bsb6/graphql_ppx-linux-x64.exe
       - name: Publish
