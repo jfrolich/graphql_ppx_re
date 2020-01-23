@@ -70,7 +70,7 @@ jobs:
     strategy:
       matrix:
         node-version: [12.x]
-        os: [windows-latest, macOS-latest]
+        os: [macOS-latest]
 
     steps:
       - uses: actions/checkout@v1
@@ -151,18 +151,17 @@ jobs:
           name: macOS-latest-bsb6
           path: binaries/darwin
 
-      - name: Download bsb6 windows artifacts
-        if: success()
-        uses: actions/download-artifact@master
-        with:
-          name: windows-latest-bsb6
-          path: binaries/windows
+      # - name: Download bsb6 windows artifacts
+      #   if: success()
+      #   uses: actions/download-artifact@master
+      #   with:
+      #     name: windows-latest-bsb6
+      #     path: binaries/windows
 
       - name: Move bsb artifacts
         if: success()
         run: |
           mv binaries/darwin/bin.exe bin/bsb6/graphql_ppx-darwin-x64.exe
-          mv binaries/windows/bin.exe bin/bsb6/graphql_ppx-win-x64.exe
           mv binaries/linux/bin.exe bin/bsb6/graphql_ppx-linux-x64.exe
       - name: Publish
         if: success()
