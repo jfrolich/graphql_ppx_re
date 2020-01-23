@@ -43,7 +43,6 @@ jobs:
           key: v1-esy-${{ matrix.os }}-${{ hashFiles('**/index.json') }}
           restore-keys: |
             v1-esy-${{ matrix.os }}-
-      # OCaml 4.06 and BuckleScript 6
       - name: install-build
         run: |
           esy install
@@ -58,7 +57,7 @@ jobs:
       #   env:
       #     CI: true
       - name: (only on release) Upload artifacts ${{ matrix.os }}
-        # if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/')
+        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@master
         with:
           name: ${{ matrix.os }}-bsb6
@@ -70,8 +69,7 @@ jobs:
     strategy:
       matrix:
         node-version: [12.x]
-        os: [macOS-latest]
-
+        os: [macOS-latest, "windows-latest"]
     steps:
       - uses: actions/checkout@v1
       - name: Use Node.js ${{ matrix.node-version }}
@@ -119,7 +117,7 @@ jobs:
       #     cd tests_bucklescript
       #     node ./run.js bsb6
       - name: (only on release) Upload artifacts ${{ matrix.os }}
-        # if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/')
+        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@master
         with:
           name: ${{ matrix.os }}-bsb6
@@ -127,7 +125,7 @@ jobs:
 
   publish:
     needs: [test_and_build, test_and_build_linux]
-    # if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/')
+    if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/')
     name: (only on release) Publish
     runs-on: ubuntu-latest
     steps:
@@ -151,12 +149,12 @@ jobs:
           name: macOS-latest-bsb6
           path: binaries/darwin
 
-      # - name: Download bsb6 windows artifacts
-      #   if: success()
-      #   uses: actions/download-artifact@master
-      #   with:
-      #     name: windows-latest-bsb6
-      #     path: binaries/windows
+      - name: Download bsb6 windows artifacts
+        if: success()
+        uses: actions/download-artifact@master
+        with:
+          name: windows-latest-bsb6
+          path: binaries/windows
 
       - name: Move bsb artifacts
         if: success()
