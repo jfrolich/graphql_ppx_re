@@ -128,7 +128,12 @@ let emit_printed_query = (~strProcess=?, parts) => {
       Some(join(acc, make_fragment_query(f)))
     };
 
-  let result = parts |> Array.fold_left(generate_expr, None);
+  let result =
+    switch (strProcess, parts) {
+    | (Some(strProcess), [|String(s)|]) =>
+      Some(make_string(strProcess(pretty_print(s))))
+    | (_, parts) => parts |> Array.fold_left(generate_expr, None)
+    };
 
   switch (result) {
   | None => make_string("")
