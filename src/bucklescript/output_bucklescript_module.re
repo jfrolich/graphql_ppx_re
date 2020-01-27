@@ -7,6 +7,7 @@ open Asttypes;
 open Parsetree;
 open Ast_helper;
 open Extract_type_definitions;
+open Output_bucklescript_utils;
 
 module StringSet = Set.Make(String);
 module VariableFinderImpl = {
@@ -210,13 +211,18 @@ let make_printed_query = (config, document) => {
       )
     };
 
-  [[%stri let query = [%e reprinted]]];
+  reprinted;
 };
 
 let generate_default_operation =
     (config, variable_defs, has_error, operation, res_structure) => {
   let parse_fn =
-    Output_bucklescript_parser.generate_parser(config, res_structure);
+    Output_bucklescript_parser.generate_parser(
+      config,
+      [],
+      Graphql_ast.Operation(operation),
+      res_structure,
+    );
   let types = Output_bucklescript_types.generate_types(config, res_structure);
   let arg_types =
     Output_bucklescript_types.generate_arg_types(config, variable_defs);
@@ -227,81 +233,130 @@ let generate_default_operation =
       extracted_args,
     );
 
-  if (has_error) {
-    [[%stri let parse = value => [%e parse_fn]]];
-  } else {
-    let variable_constructors =
-      Output_bucklescript_serializer.generate_variable_constructors(
-        config,
-        extracted_args,
-      );
-    List.concat([
-      make_printed_query(config, [Graphql_ast.Operation(operation)]),
+  let contents =
+    if (has_error) {
+      [[%stri let parse = value => [%e parse_fn]]];
+    } else {
+      let variable_constructors =
+        Output_bucklescript_serializer.generate_variable_constructors(
+          config,
+          extracted_args,
+        );
       List.concat([
-        [[%stri type raw_t]],
-        [types],
-        switch (extracted_args) {
-        | [] => []
-        | _ => [arg_types]
-        },
-        [[%stri let parse: Js.Json.t => t = value => [%e parse_fn]]],
-        switch (serialize_variable_functions) {
-        | None => [[%stri let serializeVariables = _ => Js.Json.null]]
-        | Some(f) => [f]
-        },
-        switch (variable_constructors) {
-        | None => [[%stri let makeVar = (~f, ()) => f(Js.Json.null)]]
-        | Some(c) => [c]
-        },
-        [
-          [%stri let makeVariables = makeVar(~f=f => f)],
-          [%stri
-            let make =
-              makeVar(~f=variables => {
-                {"query": query, "variables": variables, "parse": parse}
-              })
+        List.concat([
+          [
+            [%stri
+              let query = [%e
+                make_printed_query(
+                  config,
+                  [Graphql_ast.Operation(operation)],
+                )
+              ]
+            ],
           ],
-          [%stri
-            let makeWithVariables = variables => {
-              "query": query,
-              "variables": serializeVariables(variables),
-              "parse": parse,
-            }
+          [[%stri type raw_t]],
+          [types],
+          switch (extracted_args) {
+          | [] => []
+          | _ => [arg_types]
+          },
+          [[%stri let parse: Js.Json.t => t = value => [%e parse_fn]]],
+          switch (serialize_variable_functions) {
+          | None => [[%stri let serializeVariables = _ => Js.Json.null]]
+          | Some(f) => [f]
+          },
+          switch (variable_constructors) {
+          | None => [[%stri let makeVar = (~f, ()) => f(Js.Json.null)]]
+          | Some(c) => [c]
+          },
+          [
+            [%stri let makeVariables = makeVar(~f=f => f)],
+            [%stri
+              let make =
+                makeVar(~f=variables => {
+                  {"query": query, "variables": variables, "parse": parse}
+                })
+            ],
+            [%stri
+              let makeWithVariables = variables => {
+                "query": query,
+                "variables": serializeVariables(variables),
+                "parse": parse,
+              }
+            ],
+            [%stri let definition = (parse, query, makeVar)],
           ],
-          [%stri let definition = (parse, query, makeVar)],
-          // [%stri let definition = [%e definition_tuple]],
-        ],
-      ]),
-    ]);
-  };
+        ]),
+      ]);
+    };
+
+  let name =
+    switch (operation) {
+    | {item: {o_name: Some({item: name})}} => Some(name)
+    | _ => None
+    };
+  (name, contents);
 };
 
 let generate_fragment_module =
-    (config, name, _required_variables, has_error, fragment, res_structure) => {
+    (config, name, required_variables, has_error, fragment, res_structure) => {
   let parse_fn =
-    Output_bucklescript_parser.generate_parser(config, res_structure);
+    Output_bucklescript_parser.generate_parser(
+      config,
+      [],
+      Graphql_ast.Fragment(fragment),
+      res_structure,
+    );
   let types = Output_bucklescript_types.generate_types(config, res_structure);
+
+  let rec make_labeled_fun = body =>
+    fun
+    | [] => [%expr ((value: Js.Json.t) => [%e body])]
+    | [(name, type_, span, type_span), ...tl] => {
+        let loc = config.map_loc(span) |> conv_loc;
+        let type_loc = config.map_loc(type_span) |> conv_loc;
+        Ast_helper.(
+          Exp.fun_(
+            ~loc,
+            Labelled(name),
+            None,
+            Pat.constraint_(
+              Pat.var({txt: "_" ++ name, loc: type_loc}),
+              Typ.variant(
+                [
+                  Rtag(
+                    {
+                      txt:
+                        Output_bucklescript_parser.type_name_to_words(type_),
+                      loc: type_loc,
+                    },
+                    [],
+                    true,
+                    [],
+                  ),
+                ],
+                Closed,
+                None,
+              ),
+            ),
+            make_labeled_fun(body, tl),
+          )
+        );
+      };
+
+  let query = make_printed_query(config, [Graphql_ast.Fragment(fragment)]);
+  let parse =
+    [@metaloc conv_loc(config.map_loc(fragment.span))]
+    [%stri let parse = [%e make_labeled_fun(parse_fn, required_variables)]];
 
   let variable_names =
     find_variables(config, [Graphql_ast.Fragment(fragment)])
     |> StringSet.elements;
 
-  let variable_fields =
-    variable_names
-    |> List.map(name =>
-         Otag(
-           {txt: name, loc: Location.none},
-           [],
-           Ast_helper.Typ.constr(
-             {txt: Longident.Lident("unit"), loc: Location.none},
-             [],
-           ),
-         )
-       );
   let variable_obj_type =
-    Ast_helper.Typ.constr(
-      {txt: Longident.parse("Js.t"), loc: Location.none},
-      [Ast_helper.Typ.object_(variable_fields, Open)],
+    Typ.constr(
+      {txt: Longident.Lident("t_variables"), loc: Location.none},
+      [],
     );
   let contents =
     if (has_error) {
@@ -312,8 +367,8 @@ let generate_fragment_module =
       ];
     } else {
       List.concat([
-        make_printed_query(config, [Graphql_ast.Fragment(fragment)]),
         [
+          [%stri let query = [%e query]],
           types,
           [%stri type raw_t],
           Ast_helper.(
@@ -334,7 +389,7 @@ let generate_fragment_module =
               ],
             )
           ),
-          [%stri let parse: Js.Json.t => t = value => [%e parse_fn]],
+          parse,
           [%stri
             let name = [%e
               Ast_helper.Exp.constant(Pconst_string(name, None))
@@ -344,18 +399,25 @@ let generate_fragment_module =
       ]);
     };
 
-  let m =
-    Pstr_module({
-      pmb_name: {
-        txt: Generator_utils.capitalize_ascii(name),
-        loc: Location.none,
-      },
-      pmb_expr: Mod.structure(contents),
-      pmb_attributes: [],
-      pmb_loc: Location.none,
-    });
+  (Some(Generator_utils.capitalize_ascii(name)), contents);
+};
 
-  [{pstr_desc: m, pstr_loc: Location.none}];
+let wrap_module = (name: string, contents) => {
+  [
+    {
+      pstr_desc:
+        Pstr_module({
+          pmb_name: {
+            txt: Generator_utils.capitalize_ascii(name),
+            loc: Location.none,
+          },
+          pmb_expr: Mod.structure(contents),
+          pmb_attributes: [],
+          pmb_loc: Location.none,
+        }),
+      pstr_loc: Location.none,
+    },
+  ];
 };
 
 let generate_operation = config =>
@@ -372,7 +434,24 @@ let generate_operation = config =>
       structure,
     );
 
-let generate_modules = (config, operations) => {
-  let generated = List.map(generate_operation(config), operations);
-  Mod.mk(Pmod_structure(List.concat(generated)));
+let generate_modules = (config, module_definition, operations) => {
+  switch (operations) {
+  | [] => []
+  | [a] =>
+    switch (generate_operation(config, a)) {
+    | (Some(name), contents) =>
+      config.inline || module_definition
+        ? [contents] : [wrap_module(name, contents)]
+    | (None, contents) => [contents]
+    }
+  | a =>
+    a
+    |> List.map(generate_operation(config))
+    |> List.mapi((i, (name, contents)) =>
+         switch (name) {
+         | Some(name) => wrap_module(name, contents)
+         | None => wrap_module("Untitled" ++ string_of_int(i), contents)
+         }
+       )
+  };
 };

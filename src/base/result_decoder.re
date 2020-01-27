@@ -44,6 +44,27 @@ let find_argument = (name, arguments) =>
        }
      );
 
+let find_fragment_arguments =
+    (directives: list(Source_pos.spanning(Graphql_ast.directive))) => {
+  switch (directives |> List.find(d => d.item.d_name.item == "arguments")) {
+  | {item: {d_arguments: Some(arguments)}} =>
+    arguments.item
+    |> List.fold_left(
+         acc =>
+           fun
+           | ({item: name}, {item: Iv_variable(variable_name)})
+               when name == variable_name => [
+               name,
+               ...acc,
+             ]
+           | _ => acc,
+         [],
+       )
+  | _ => []
+  | exception Not_found => []
+  };
+};
+
 let rec unify_type =
         (
           error_marker,
@@ -342,6 +363,7 @@ and unify_selection = (error_marker, config, ty, selection) =>
   switch (selection) {
   | Field(field_span) => unify_field(error_marker, config, field_span, ty)
   | FragmentSpread({item: {fs_directives, fs_name}, span}) =>
+    let arguments = find_fragment_arguments(fs_directives);
     switch (find_directive("bsField", fs_directives)) {
     | None =>
       let key =
@@ -358,6 +380,7 @@ and unify_selection = (error_marker, config, ty, selection) =>
         | Object({om_name}) => Some(om_name)
         | _ => None
         },
+        arguments,
       );
     | Some({item: {d_arguments, _}, span}) =>
       switch (find_argument("name", d_arguments)) {
@@ -376,6 +399,7 @@ and unify_selection = (error_marker, config, ty, selection) =>
           | Object({om_name}) => Some(om_name)
           | _ => None
           },
+          arguments,
         )
       | Some(_) =>
         raise_error(
@@ -384,7 +408,7 @@ and unify_selection = (error_marker, config, ty, selection) =>
           "The 'name' argument must be a string",
         )
       }
-    }
+    };
   | InlineFragment({span, _}) =>
     raise_error(
       config.map_loc,
@@ -402,7 +426,9 @@ and unify_selection_set =
       span,
       "Must select subfields on objects",
     )
-  | Some({item: [FragmentSpread({item, _})], _}) =>
+  | Some({item: [FragmentSpread({item: {fs_directives, fs_name}, _})], _}) =>
+    let arguments = find_fragment_arguments(fs_directives);
+
     if (as_record) {
       make_error(
         error_marker,
@@ -411,8 +437,12 @@ and unify_selection_set =
         "@bsRecord can not be used with fragment spreads, place @bsRecord on the fragment definition instead",
       );
     } else {
-      Res_solo_fragment_spread(config.map_loc(span), item.fs_name.item);
-    }
+      Res_solo_fragment_spread(
+        config.map_loc(span),
+        fs_name.item,
+        arguments,
+      );
+    };
   | Some({item, _}) when as_record =>
     Res_record(
       config.map_loc(span),
@@ -477,10 +507,47 @@ let unify_operation = (error_marker, config) =>
       )
     };
 
+let getFragmentArgumentDefinitions =
+    (directives: list(Source_pos.spanning(Graphql_ast.directive))) => {
+  switch (
+    directives |> List.find(d => {d.item.d_name.item == "argumentDefinitions"})
+  ) {
+  | {item: {d_arguments: Some(arguments)}, span} =>
+    arguments.item
+    |> List.fold_left(
+         acc =>
+           fun
+           | (
+               {item: key, span},
+               {item: Iv_object(values), span: type_span},
+             ) => {
+               let type_ =
+                 values
+                 |> List.fold_left(
+                      acc =>
+                        fun
+                        | ({item: "type"}, {item: Iv_string(type_)}) =>
+                          Some(type_)
+                        | _ => acc,
+                      None,
+                    );
+               switch (type_) {
+               | Some(type_) => [(key, type_, span, type_span), ...acc]
+               | _ => acc
+               };
+             }
+           | _ => acc,
+         [],
+       )
+  | _ => []
+  | exception Not_found => []
+  };
+};
+
 let rec unify_document_schema = (config, document) => {
   let error_marker = {Generator_utils.has_error: false};
   switch (document) {
-  | [Operation({item: {o_variable_definitions, _}, _} as op)] =>
+  | [Operation({item: {o_variable_definitions, _}, _} as op), ...rest] =>
     let structure = unify_operation(error_marker, config, op);
     [
       Mod_default_operation(
@@ -489,6 +556,7 @@ let rec unify_document_schema = (config, document) => {
         op,
         structure,
       ),
+      ...unify_document_schema(config, rest),
     ];
   | [
       Fragment(
@@ -501,11 +569,13 @@ let rec unify_document_schema = (config, document) => {
     ] => [
       {
         let is_record = has_directive("bsRecord", fg_directives);
+        let argumentDefinitions =
+          getFragmentArgumentDefinitions(fg_directives);
         switch (Schema.lookup_type(config.schema, fg_type_condition.item)) {
         | None =>
           Mod_fragment(
             fg_name.item,
-            [],
+            argumentDefinitions,
             true,
             fg,
             make_error(
@@ -525,10 +595,12 @@ let rec unify_document_schema = (config, document) => {
               ty,
               Some(fg_selection_set),
             );
+          let argumentDefinitions =
+            getFragmentArgumentDefinitions(fg_directives);
 
           Mod_fragment(
             fg_name.item,
-            [],
+            argumentDefinitions,
             error_marker.has_error,
             fg,
             structure,
@@ -538,7 +610,5 @@ let rec unify_document_schema = (config, document) => {
       ...unify_document_schema(config, rest),
     ]
   | [] => []
-  | _ =>
-    raise @@ Unimplemented("unification with other than singular queries")
   };
 };

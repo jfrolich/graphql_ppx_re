@@ -16,15 +16,6 @@ let make_error_raiser = message =>
 // duplicate of ouput_bucklescript_decoder
 let const_str_expr = s => Ast_helper.(Exp.constant(Pconst_string(s, None)));
 
-let generate_name = (~prefix="t") =>
-  fun
-  | [] => prefix
-  | path => {
-      path
-      |> List.rev
-      |> List.fold_left((acc, item) => acc ++ "_" ++ item, prefix);
-    };
-
 let base_type = (~inner=[], name) => {
   Ast_helper.Typ.constr(
     {Location.txt: Longident.parse(name), loc: Location.none},
@@ -47,7 +38,7 @@ let rec generate_type = (config, path) =>
   | Res_boolean(loc) => base_type("bool")
   | Res_raw_scalar(loc) => base_type("Js.Json.t")
   | Res_object(_loc, name, _fields)
-  | Res_record(_loc, name, _fields) => base_type(generate_name(path))
+  | Res_record(_loc, name, _fields) => base_type(generate_type_name(path))
   | Res_poly_variant_union(loc, name, fragments, exhaustive_flag) => {
       let (fallback_case, fallback_case_ty) =
         Ast_406.Parsetree.(
@@ -102,7 +93,7 @@ let rec generate_type = (config, path) =>
         )
       );
     }
-  | Res_solo_fragment_spread(loc, module_name) =>
+  | Res_solo_fragment_spread(loc, module_name, _arguments) =>
     base_type(module_name ++ ".t")
   | Res_poly_variant_interface(loc, name, base, fragments) => {
       let map_case_ty = ((name, res)) =>
@@ -185,7 +176,7 @@ let generate_record_type = (config, fields, obj_path) => {
                ),
            ),
       ),
-    {loc: Location.none, txt: generate_name(obj_path)},
+    {loc: Location.none, txt: generate_type_name(obj_path)},
   );
 };
 
@@ -243,7 +234,7 @@ let generate_object_type = (config, fields, obj_path) => {
               ),
             ],
           ),
-        {loc: Location.none, txt: generate_name(obj_path)},
+        {loc: Location.none, txt: generate_type_name(obj_path)},
       )
     )
   );
@@ -292,7 +283,7 @@ let rec generate_arg_type = loc =>
       )
     )
   | Type(InputObject({iom_name})) =>
-    base_type(generate_name(~prefix="t_variables", [iom_name]))
+    base_type(generate_type_name(~prefix="t_variables", [iom_name]))
   | Type(Object(_)) =>
     raise(
       Location.Error(
@@ -343,7 +334,7 @@ let generate_record_input_object = (input_obj_name, fields) => {
     {
       loc: Location.none,
       txt:
-        generate_name(
+        generate_type_name(
           ~prefix="t_variables",
           switch (input_obj_name) {
           | None => []
@@ -381,7 +372,7 @@ let generate_object_input_object = (input_obj_name, fields) => {
         {
           loc: Location.none,
           txt:
-            generate_name(
+            generate_type_name(
               ~prefix="t_variables",
               switch (input_obj_name) {
               | None => []
@@ -402,11 +393,13 @@ let generate_input_object =
 };
 
 let generate_arg_types = (config, variable_defs) => {
-  extract_args(config, variable_defs)
+  let input_objects = extract_args(config, variable_defs);
+
+  input_objects
   |> List.map(
        fun
-       | InputObject({name: input_obj_name, fields}) => {
-           generate_input_object(config, input_obj_name, fields);
+       | InputObject({name, fields}) => {
+           generate_input_object(config, name, fields);
          },
      )
   |> Ast_helper.Str.type_(Recursive);

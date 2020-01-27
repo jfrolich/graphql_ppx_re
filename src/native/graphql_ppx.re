@@ -112,6 +112,7 @@ let rewrite_query = (~schema=?, ~loc, ~delim, ~query, ()) => {
         schema: Lazy.force(Read_schema.get_schema(schema)),
         template_literal: None,
         records: false,
+        inline: false,
       };
       switch (Validations.run_validators(config, document)) {
       | Some(errs) =>
@@ -186,8 +187,8 @@ let () =
         let loc = conv_loc(loc);
         raise(Location.Error(Location.error(~loc, message)));
       },
-      lean_parse: false,
       records: false,
+      legacy: true,
     })
   );
 
