@@ -9,9 +9,77 @@ open Parsetree;
 open Generator_utils;
 open Output_bucklescript_utils;
 
-let const_str_expr = s => Ast_helper.(Exp.constant(Pconst_string(s, None)));
+let rec generate_poly_type_ref_name = (type_ref: Graphql_ast.type_ref) => {
+  switch (type_ref) {
+  | Tr_named({item: name}) => name
+  | Tr_list({item: type_ref}) =>
+    "ListOf_" ++ generate_poly_type_ref_name(type_ref)
+  | Tr_non_null_named({item: name}) => "NonNull_" ++ name
+  | Tr_non_null_list({item: type_ref}) =>
+    "NonNullListOf_" ++ generate_poly_type_ref_name(type_ref)
+  };
+};
 
-let lean_parse = () => Ppx_config.lean_parse();
+// let type_name_to_words = type_name => {
+//   type_name
+//   |> Str.global_replace(Str.regexp("\\["), "")
+//   |> Str.global_replace(Str.regexp("\\]!"), "_OfNonNullList")
+//   |> Str.global_replace(Str.regexp("\\]"), "_OfList")
+//   |> Str.global_replace(Str.regexp("!"), "_NonNull");
+// };
+
+let type_name_to_words = type_name => {
+  let str = ref("");
+  type_name
+  |> String.iter(
+       fun
+       | '!' => str := str^ ++ "_NonNull"
+       | ']' => str := str^ ++ "_OfList"
+       | c => str := str^ ++ String.make(1, c),
+     );
+  str^;
+};
+
+let rec alternative_generate_poly_type_ref_name =
+        (type_ref: Graphql_ast.type_ref) => {
+  Graphql_printer.print_type(type_ref) |> type_name_to_words;
+};
+
+let get_variable_definitions = (definition: Graphql_ast.definition) => {
+  switch (definition) {
+  | Fragment({item: {fg_directives: directives}}) =>
+    Result_decoder.getFragmentArgumentDefinitions(directives)
+    |> List.map(((name, type_, span, type_span)) =>
+         (name, type_name_to_words(type_), span, type_span)
+       )
+  | Operation({item: {o_variable_definitions: Some({item: definitions})}}) =>
+    Graphql_ast.(
+      definitions
+      |> List.fold_left(
+           acc =>
+             fun
+             | (
+                 {Source_pos.item: name, span},
+                 {vd_type: {item: type_ref, span: type_span}},
+               ) => [
+                 (
+                   name,
+                   Graphql_printer.print_type(type_ref) |> type_name_to_words,
+                   span,
+                   type_span,
+                 ),
+                 ...acc,
+               ],
+           [],
+         )
+    )
+  | _ => []
+  };
+};
+
+let const_str_expr = s => Ast_helper.(Exp.constant(Pconst_string(s, None)));
+let ident_from_string = (~loc=Location.none, ident) =>
+  Ast_helper.(Exp.ident(~loc, {txt: Longident.parse(ident), loc}));
 
 let make_error_raiser = message =>
   if (Ppx_config.verbose_error_handling()) {
@@ -74,14 +142,11 @@ let boolean_decoder = loc =>
   );
 let id_decoder = string_decoder;
 
-let string_decoder_lean = loc =>
-  [@metaloc loc] [%expr (Obj.magic(value): string)];
-let id_decoder_lean = string_decoder_lean;
-let float_decoder_lean = loc =>
-  [@metaloc loc] [%expr (Obj.magic(value): float)];
-let int_decoder_lean = loc => [@metaloc loc] [%expr (Obj.magic(value): int)];
-let boolean_decoder_lean = loc =>
-  [@metaloc loc] [%expr (Obj.magic(value): bool)];
+let string_decoder = loc => [@metaloc loc] [%expr (Obj.magic(value): string)];
+let id_decoder = string_decoder;
+let float_decoder = loc => [@metaloc loc] [%expr (Obj.magic(value): float)];
+let int_decoder = loc => [@metaloc loc] [%expr (Obj.magic(value): int)];
+let boolean_decoder = loc => [@metaloc loc] [%expr (Obj.magic(value): bool)];
 
 let generate_poly_enum_decoder = (loc, enum_meta) => {
   let enum_match_arms =
@@ -144,11 +209,34 @@ let generate_poly_enum_decoder = (loc, enum_meta) => {
   };
 };
 
-let generate_solo_fragment_spread = (loc, name) => {
+let generate_fragment_parse_fun = (config, loc, name, arguments, definition) => {
   let ident =
     Ast_helper.Exp.ident({loc, txt: Longident.parse(name ++ ".parse")});
-  %expr
-  [%e ident](value);
+  let variable_defs = get_variable_definitions(definition);
+  let labeled_args =
+    variable_defs
+    |> List.filter(((name, _, _, _)) =>
+         arguments |> List.exists(arg => arg == name)
+       )
+    |> List.map(((arg_name, type_, _span, type_span)) =>
+         (
+           Labelled(arg_name),
+           Ast_helper.Exp.variant(
+             ~loc=config.map_loc(type_span) |> conv_loc,
+             type_,
+             None,
+           ),
+         )
+       );
+
+  Ast_helper.Exp.apply(
+    ~loc,
+    ident,
+    List.append(labeled_args, [(Nolabel, ident_from_string("value"))]),
+  );
+};
+let generate_solo_fragment_spread = (config, loc, name, arguments, definition) => {
+  generate_fragment_parse_fun(config, loc, name, arguments, definition);
 };
 
 let generate_error = (loc, message) => {
@@ -158,41 +246,47 @@ let generate_error = (loc, message) => {
   Ast_helper.Exp.extension(~loc, ext);
 };
 
-let rec generate_parser = config =>
+let rec generate_parser = (config, path: list(string), definition) =>
   fun
   | Res_nullable(loc, inner) =>
-    lean_parse()
-      ? generate_nullable_decoder_lean(config, conv_loc(loc), inner)
-      : generate_nullable_decoder(config, conv_loc(loc), inner)
+    generate_nullable_decoder(config, conv_loc(loc), inner, path, definition)
   | Res_array(loc, inner) =>
-    lean_parse()
-      ? generate_array_decoder_lean(config, conv_loc(loc), inner)
-      : generate_array_decoder(config, conv_loc(loc), inner)
-  | Res_id(loc) =>
-    lean_parse()
-      ? id_decoder_lean(conv_loc(loc)) : id_decoder(conv_loc(loc))
-  | Res_string(loc) =>
-    lean_parse()
-      ? string_decoder_lean(conv_loc(loc)) : string_decoder(conv_loc(loc))
-  | Res_int(loc) =>
-    lean_parse()
-      ? int_decoder_lean(conv_loc(loc)) : int_decoder(conv_loc(loc))
-  | Res_float(loc) =>
-    lean_parse()
-      ? float_decoder_lean(conv_loc(loc)) : float_decoder(conv_loc(loc))
-  | Res_boolean(loc) =>
-    lean_parse()
-      ? boolean_decoder_lean(conv_loc(loc))
-      : boolean_decoder(conv_loc(loc))
+    generate_array_decoder(config, conv_loc(loc), inner, path, definition)
+  | Res_id(loc) => id_decoder(conv_loc(loc))
+  | Res_string(loc) => string_decoder(conv_loc(loc))
+  | Res_int(loc) => int_decoder(conv_loc(loc))
+  | Res_float(loc) => float_decoder(conv_loc(loc))
+  | Res_boolean(loc) => boolean_decoder(conv_loc(loc))
   | Res_raw_scalar(_) => [%expr value]
   | Res_poly_enum(loc, enum_meta) =>
     generate_poly_enum_decoder(conv_loc(loc), enum_meta)
   | Res_custom_decoder(loc, ident, inner) =>
-    generate_custom_decoder(config, conv_loc(loc), ident, inner)
+    generate_custom_decoder(
+      config,
+      conv_loc(loc),
+      ident,
+      inner,
+      path,
+      definition,
+    )
   | Res_record(loc, name, fields) =>
-    generate_object_decoder(config, conv_loc(loc), name, fields)
+    generate_object_decoder(
+      config,
+      conv_loc(loc),
+      name,
+      fields,
+      path,
+      definition,
+    )
   | Res_object(loc, name, fields) =>
-    generate_object_decoder(config, conv_loc(loc), name, fields)
+    generate_object_decoder(
+      config,
+      conv_loc(loc),
+      name,
+      fields,
+      path,
+      definition,
+    )
   | Res_poly_variant_union(loc, name, fragments, exhaustive) =>
     generate_poly_variant_union(
       config,
@@ -200,6 +294,8 @@ let rec generate_parser = config =>
       name,
       fragments,
       exhaustive,
+      path,
+      definition,
     )
   | Res_poly_variant_interface(loc, name, base, fragments) =>
     generate_poly_variant_interface(
@@ -208,49 +304,38 @@ let rec generate_parser = config =>
       name,
       base,
       fragments,
+      [name, ...path],
+      definition,
     )
-  | Res_solo_fragment_spread(loc, name) =>
-    generate_solo_fragment_spread(conv_loc(loc), name)
+  | Res_solo_fragment_spread(loc, name, arguments) =>
+    generate_solo_fragment_spread(
+      config,
+      conv_loc(loc),
+      name,
+      arguments,
+      definition,
+    )
   | Res_error(loc, message) => generate_error(conv_loc(loc), message)
-and generate_nullable_decoder_lean = (config, loc, inner) =>
+and generate_nullable_decoder = (config, loc, inner, path, definition) =>
   [@metaloc loc]
   (
     switch%expr (Js.toOption(Obj.magic(value): Js.Nullable.t('a))) {
-    | Some(_) => Some([%e generate_parser(config, inner)])
+    | Some(_) => Some([%e generate_parser(config, path, definition, inner)])
     | None => None
     }
     // (Obj.magic(value): Js.Nullable.t('a)) == Js.Nullable.null
     // || (Obj.magic(value): Js.Nullable.t('a)) == Js.Nullable.undefined
   )
-and generate_nullable_decoder = (config, loc, inner) =>
-  [@metaloc loc]
-  (
-    switch%expr (Js.Json.decodeNull(value)) {
-    | None => Some([%e generate_parser(config, inner)])
-    | Some(_) => None
-    }
-  )
-and generate_array_decoder = (config, loc, inner) =>
-  [@metaloc loc]
-  [%expr
-    value
-    |> Js.Json.decodeArray
-    |> Js.Option.getExn
-    |> Js.Array.map(value => {
-         %e
-         generate_parser(config, inner)
-       })
-  ]
-and generate_array_decoder_lean = (config, loc, inner) =>
+and generate_array_decoder = (config, loc, inner, path, definition) =>
   [@metaloc loc]
   [%expr
     Obj.magic(value)
     |> Js.Array.map(value => {
          %e
-         generate_parser(config, inner)
+         generate_parser(config, path, definition, inner)
        })
   ]
-and generate_custom_decoder = (config, loc, ident, inner) => {
+and generate_custom_decoder = (config, loc, ident, inner, path, definition) => {
   let fn_expr =
     Ast_helper.(
       Exp.ident({
@@ -258,51 +343,78 @@ and generate_custom_decoder = (config, loc, ident, inner) => {
         txt: Longident.parse(ident ++ ".parse"),
       })
     );
-  [@metaloc loc] [%expr [%e fn_expr]([%e generate_parser(config, inner)])];
+  [@metaloc loc]
+  [%expr
+    [%e fn_expr]([%e generate_parser(config, path, definition, inner)])
+  ];
 }
-and generate_object_decoder = (config, loc, name, fields) => {
+and generate_object_decoder = (config, loc, name, fields, path, definition) => {
   let rec do_obj_constructor = () => {
     Ast_406.(
       Ast_helper.(
         Exp.extension((
           {txt: "bs.obj", loc},
-          PStr([[%stri [%e do_obj_constructor_lean()]]]),
+          PStr([[%stri [%e do_obj_constructor_base()]]]),
         ))
       )
     );
   }
-  and do_obj_constructor_lean = () => {
-    Ast_helper.Exp.record(
-      fields
-      |> List.map(
-           fun
-           | Fr_named_field(key, _, inner) => (
-               {Location.txt: Longident.parse(key), loc},
-               {
-                 let%expr value =
-                   Js.Dict.unsafeGet(
-                     Obj.magic(value),
-                     [%e const_str_expr(key)],
-                   );
+  and do_obj_constructor_base = () => {
+    Ast_helper.(
+      Exp.record(
+        fields
+        |> List.map(
+             fun
+             | Fr_named_field(key, _, inner) => (
+                 {Location.txt: Longident.parse(key), loc},
+                 {
+                   let%expr value =
+                     Js.Dict.unsafeGet(
+                       Obj.magic(value),
+                       [%e const_str_expr(key)],
+                     );
 
-                 %e
-                 generate_parser(config, inner);
-               },
-             )
-           | Fr_fragment_spread(key, loc, name, _) => (
-               {Location.txt: Longident.parse(key), loc: conv_loc(loc)},
-               {
-                 let ident =
-                   Ast_helper.Exp.ident({
-                     loc: conv_loc(loc),
-                     txt: Longident.parse(name ++ ".parse"),
-                   });
-                 %expr
-                 [%e ident](Obj.magic(value));
-               },
-             ),
-         ),
-      None,
+                   %e
+                   generate_parser(
+                     config,
+                     [key, ...path],
+                     definition,
+                     inner,
+                   );
+                 },
+               )
+             | Fr_fragment_spread(key, loc, name, _, arguments) => (
+                 {Location.txt: Longident.parse(key), loc: conv_loc(loc)},
+                 {
+                   generate_fragment_parse_fun(
+                     config,
+                     conv_loc(loc),
+                     name,
+                     arguments,
+                     definition,
+                   );
+                 },
+               ),
+           ),
+        None,
+      )
+    );
+  }
+  and do_obj_constructor_records = () => {
+    Ast_helper.(
+      Exp.constraint_(
+        do_obj_constructor_base(),
+        Ast_helper.Typ.constr(
+          {
+            txt:
+              Longident.Lident(
+                Extract_type_definitions.generate_type_name(path),
+              ),
+            loc: Location.none,
+          },
+          [],
+        ),
+      )
     );
   }
   and obj_constructor = () => {
@@ -311,23 +423,32 @@ and generate_object_decoder = (config, loc, name, fields) => {
     %e
     do_obj_constructor();
   }
-  and obj_constructor_lean = () =>
+  and obj_constructor_records = () =>
     [@metaloc loc]
     {
-      do_obj_constructor_lean();
+      do_obj_constructor_records();
     };
 
-  config.records ? obj_constructor_lean() : obj_constructor();
+  config.records ? obj_constructor_records() : obj_constructor();
 }
-and generate_poly_variant_selection_set = (config, loc, name, fields) => {
+and generate_poly_variant_selection_set =
+    (config, loc, name, fields, path, definition) => {
   let rec generator_loop =
     fun
     | [(field, inner), ...next] => {
+        let field_name = Compat.capitalize_ascii(field);
         let variant_decoder =
           Ast_helper.(
             Exp.variant(
-              Compat.capitalize_ascii(field),
-              Some(generate_parser(config, inner)),
+              field_name,
+              Some(
+                generate_parser(
+                  config,
+                  [field_name, ...path],
+                  definition,
+                  inner,
+                ),
+              ),
             )
           );
         switch%expr (Js.Dict.get(value, [%e const_str_expr(field)])) {
@@ -399,12 +520,18 @@ and generate_poly_variant_selection_set = (config, loc, name, fields) => {
     }
   );
 }
-and generate_poly_variant_interface = (config, loc, name, base, fragments) => {
+and generate_poly_variant_interface =
+    (config, loc, name, base, fragments, path, definition) => {
   let map_fallback_case = ((type_name, inner)) => {
     open Ast_helper;
     let name_pattern = Pat.any();
 
-    Exp.variant(type_name, Some(generate_parser(config, inner)))
+    Exp.variant(
+      type_name,
+      Some(
+        generate_parser(config, [type_name, ...path], definition, inner),
+      ),
+    )
     |> Exp.case(name_pattern);
   };
 
@@ -412,7 +539,12 @@ and generate_poly_variant_interface = (config, loc, name, base, fragments) => {
     open Ast_helper;
     let name_pattern = Pat.constant(Pconst_string(type_name, None));
 
-    Exp.variant(type_name, Some(generate_parser(config, inner)))
+    Exp.variant(
+      type_name,
+      Some(
+        generate_parser(config, [type_name, ...path], definition, inner),
+      ),
+    )
     |> Exp.case(name_pattern);
   };
   let map_case_ty = ((name, _)) =>
@@ -481,14 +613,24 @@ and generate_poly_variant_interface = (config, loc, name, base, fragments) => {
   );
 }
 and generate_poly_variant_union =
-    (config, loc, name, fragments, exhaustive_flag) => {
+    (config, loc, name, fragments, exhaustive_flag, path, definition) => {
   let fragment_cases =
     Ast_helper.(
       fragments
       |> List.map(((type_name, inner)) => {
            let name_pattern = Pat.constant(Pconst_string(type_name, None));
            Ast_helper.(
-             Exp.variant(type_name, Some(generate_parser(config, inner)))
+             Exp.variant(
+               type_name,
+               Some(
+                 generate_parser(
+                   config,
+                   [type_name, ...path],
+                   definition,
+                   inner,
+                 ),
+               ),
+             )
            )
            |> Exp.case(name_pattern);
          })

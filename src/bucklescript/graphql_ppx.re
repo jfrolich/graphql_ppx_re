@@ -59,7 +59,17 @@ let make_error_expr = (loc, message) => {
 };
 
 let rewrite_query =
-    (~template_literal=?, ~records=?, ~schema=?, ~loc, ~delim, ~query, ()) => {
+    (
+      ~template_literal=?,
+      ~schema=?,
+      ~records=?,
+      ~inline=?,
+      ~loc,
+      ~delim,
+      ~query,
+      ~module_definition,
+      (),
+    ) => {
   open Ast_406;
   open Ast_helper;
   open Parsetree;
@@ -101,25 +111,31 @@ let rewrite_query =
           | Some(value) => value
           | None => global_records()
           },
+        inline:
+          switch (inline) {
+          | Some(value) => value
+          | None => false
+          },
         /*  the only call site of schema, make it lazy! */
         schema: Lazy.force(Read_schema.get_schema(schema)),
         template_literal,
       };
       switch (Validations.run_validators(config, document)) {
       | Some(errs) =>
-        Mod.mk(
-          Pmod_structure(
-            errs
-            |> List.map(((loc, msg)) => {
-                 let loc = conv_loc(loc);
-                 %stri
-                 [%e make_error_expr(loc, msg)];
-               }),
-          ),
-        )
+        let errs =
+          errs
+          |> List.map(((loc, msg)) => {
+               let loc = conv_loc(loc);
+               %stri
+               [%e make_error_expr(loc, msg)];
+             });
+        [errs];
       | None =>
         Result_decoder.unify_document_schema(config, document)
-        |> Output_bucklescript_module.generate_modules(config)
+        |> Output_bucklescript_module.generate_modules(
+             config,
+             module_definition,
+           )
       };
     };
   };
@@ -157,25 +173,26 @@ let extract_schema_from_config = config_fields => {
   };
 };
 
-let extract_records_from_config = config_fields => {
+let extract_bool_from_config = (name, config_fields) => {
   open Ast_406;
   open Asttypes;
   open Parsetree;
 
-  let maybe_records_field =
+  let maybe_field_value =
     try(
       Some(
         List.find(
           config_field =>
             switch (config_field) {
             | (
-                {txt: Longident.Lident("records"), _},
+                {txt: Longident.Lident(matched_name), _},
                 {
                   pexp_desc:
                     Pexp_construct({txt: Longident.Lident(_value)}, _),
                   _,
                 },
-              ) =>
+              )
+                when matched_name == name =>
               true
             | _ => false
             },
@@ -186,7 +203,7 @@ let extract_records_from_config = config_fields => {
     | _ => None
     };
 
-  switch (maybe_records_field) {
+  switch (maybe_field_value) {
   | Some((
       _,
       {pexp_desc: Pexp_construct({txt: Longident.Lident(value)}, _), _},
@@ -211,7 +228,7 @@ let extract_template_literal_from_config = config_fields => {
           config_field =>
             switch (config_field) {
             | (
-                {txt: Longident.Lident("templateLiteral"), _},
+                {txt: Longident.Lident("templateTag"), _},
                 {pexp_desc: Pexp_ident({txt: _}), _},
               ) =>
               true
@@ -225,20 +242,25 @@ let extract_template_literal_from_config = config_fields => {
     };
 
   switch (maybe_template_literal_field) {
-  // in case it's a single identifier: "graphql"
-  | Some((_, {pexp_desc: Pexp_ident({txt: Longident.Lident(f)})})) =>
-    Some(f)
-  // in case it's a dot identifier: "Gatsby.graphql"
-  // note we only pattern match on a single dot, so FirstModule.Gatsby.graphql
-  // wouldn't work
-  | Some((
-      _,
-      {pexp_desc: Pexp_ident({txt: Ldot(Longident.Lident(m), fn)})},
-    )) =>
-    Some(m ++ "." ++ fn)
+  | Some((_, {pexp_desc: Pexp_ident({txt: lident})})) =>
+    Some(
+      Longident.flatten(lident)
+      |> List.fold_left(
+           (acc, elem) =>
+             if (acc == "") {
+               elem;
+             } else {
+               acc ++ "." ++ elem;
+             },
+           "",
+         ),
+    )
   | _ => None
   };
 };
+
+let extract_records_from_config = extract_bool_from_config("records");
+let extract_inline_from_config = extract_bool_from_config("inline");
 
 // Default configuration
 let () =
@@ -259,8 +281,8 @@ let () =
         let loc = conv_loc(loc);
         raise(Location.Error(Location.error(~loc, message)));
       },
-      lean_parse: true,
       records: false,
+      legacy: false,
     })
   );
 
@@ -297,19 +319,26 @@ let mapper = (_config, _cookies) => {
                     _,
                   },
                 ]) =>
-                let maybe_schema = extract_schema_from_config(fields);
-                let maybe_template_literal =
-                  extract_template_literal_from_config(fields);
-
-                rewrite_query(
-                  ~schema=?maybe_schema,
-                  ~template_literal=?maybe_template_literal,
-                  ~records=?extract_records_from_config(fields),
-                  ~loc=conv_loc_from_ast(loc),
-                  ~delim,
-                  ~query,
-                  (),
-                );
+                Ast_helper.(
+                  Mod.mk(
+                    Pmod_structure(
+                      List.concat(
+                        rewrite_query(
+                          ~template_literal=?
+                            extract_template_literal_from_config(fields),
+                          ~schema=?extract_schema_from_config(fields),
+                          ~records=?extract_records_from_config(fields),
+                          ~inline=?extract_inline_from_config(fields),
+                          ~loc=conv_loc_from_ast(loc),
+                          ~delim,
+                          ~query,
+                          ~module_definition=true,
+                          (),
+                        ),
+                      ),
+                    ),
+                  )
+                )
               | PStr([
                   {
                     pstr_desc:
@@ -325,11 +354,20 @@ let mapper = (_config, _cookies) => {
                     _,
                   },
                 ]) =>
-                rewrite_query(
-                  ~loc=conv_loc_from_ast(loc),
-                  ~delim,
-                  ~query,
-                  (),
+                Ast_helper.(
+                  Mod.mk(
+                    Pmod_structure(
+                      List.concat(
+                        rewrite_query(
+                          ~loc=conv_loc_from_ast(loc),
+                          ~delim,
+                          ~query,
+                          ~module_definition=true,
+                          (),
+                        ),
+                      ),
+                    ),
+                  )
                 )
               | _ =>
                 raise(
@@ -343,6 +381,127 @@ let mapper = (_config, _cookies) => {
               }
             | other => default_mapper.module_expr(mapper, other)
             },
+          structure: (mapper, struc) => {
+            struc
+            |> List.fold_left(
+                 acc =>
+                   fun
+                   | {
+                       pstr_desc:
+                         Pstr_eval(
+                           {
+                             pexp_desc:
+                               Pexp_extension(({txt: "graphql", loc}, pstr)),
+                           },
+                           _,
+                         ),
+                     }
+                   | {
+                       pstr_desc:
+                         Pstr_value(
+                           _,
+                           [
+                             {
+                               pvb_pat: {ppat_desc: _},
+                               pvb_expr: {
+                                 pexp_desc:
+                                   Pexp_extension((
+                                     {txt: "graphql", loc},
+                                     pstr,
+                                   )),
+                               },
+                             },
+                           ],
+                         ),
+                     } =>
+                     switch (pstr) {
+                     | PStr([
+                         {
+                           pstr_desc:
+                             Pstr_eval(
+                               {
+                                 pexp_loc: loc,
+                                 pexp_desc:
+                                   Pexp_constant(
+                                     Pconst_string(query, delim),
+                                   ),
+                                 _,
+                               },
+                               _,
+                             ),
+                           _,
+                         },
+                         {
+                           pstr_desc:
+                             Pstr_eval(
+                               {pexp_desc: Pexp_record(fields, None), _},
+                               _,
+                             ),
+                           _,
+                         },
+                       ]) =>
+                       List.append(
+                         acc,
+                         List.concat(
+                           rewrite_query(
+                             ~schema=?extract_schema_from_config(fields),
+                             ~records=?extract_records_from_config(fields),
+                             ~inline=?extract_inline_from_config(fields),
+                             ~loc=conv_loc_from_ast(loc),
+                             ~delim,
+                             ~query,
+                             ~module_definition=false,
+                             (),
+                           ),
+                         ),
+                       )
+                     | PStr([
+                         {
+                           pstr_desc:
+                             Pstr_eval(
+                               {
+                                 pexp_loc: loc,
+                                 pexp_desc:
+                                   Pexp_constant(
+                                     Pconst_string(query, delim),
+                                   ),
+                                 _,
+                               },
+                               _,
+                             ),
+                           _,
+                         },
+                       ]) =>
+                       List.append(
+                         acc,
+                         List.concat(
+                           rewrite_query(
+                             ~loc=conv_loc_from_ast(loc),
+                             ~delim,
+                             ~query,
+                             ~module_definition=false,
+                             (),
+                           ),
+                         ),
+                       )
+                     | _ =>
+                       raise(
+                         Location.Error(
+                           Location.error(
+                             ~loc,
+                             "[%graphql] accepts a string, e.g. [%graphql {| { query |}]",
+                           ),
+                         ),
+                       )
+                     }
+                   | other =>
+                     List.append(
+                       acc,
+                       [default_mapper.structure_item(mapper, other)],
+                     ),
+                 [],
+               );
+          },
         }
       )
     )
@@ -400,19 +559,25 @@ let args = [
     "Verbose error handling. If not defined NODE_ENV will be used",
   ),
   (
-    "-lean-parse",
-    Arg.Unit(
-      () =>
-        Ppx_config.update_config(current => {...current, lean_parse: true}),
-    ),
-    "A leaner parse function (experimental)",
-  ),
-  (
     "-records",
     Arg.Unit(
       () => Ppx_config.update_config(current => {...current, records: true}),
     ),
     "Compile to records instead of objects (experimental)",
+  ),
+  (
+    "-legacy",
+    Arg.Unit(
+      () => Ppx_config.update_config(current => {...current, records: false}),
+    ),
+    "Legacy mode",
+  ),
+  (
+    "-modern",
+    Arg.Unit(
+      () => Ppx_config.update_config(current => {...current, records: true}),
+    ),
+    "Modern mode",
   ),
 ];
 
