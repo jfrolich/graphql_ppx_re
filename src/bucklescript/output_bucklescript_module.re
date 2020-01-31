@@ -97,7 +97,27 @@ let compress_parts = (parts: array(Graphql_printer.t)) => {
   );
 };
 
-let emit_printed_query = (~strProcess=?, parts) => {
+let emit_printed_template_query = (parts: array(Graphql_printer.t)) => {
+  switch (parts) {
+  | [|String(s)|] => s
+  | [||] => ""
+  | parts =>
+    Graphql_printer.(
+      Array.fold_left(
+        acc =>
+          fun
+          | Empty => acc
+          | String(s) => acc ++ s
+          | FragmentNameRef(f) => acc ++ "${" ++ f ++ ".name" ++ "}"
+          | FragmentQueryRef(f) => acc ++ "${" ++ f ++ ".query" ++ "}",
+        "",
+        parts,
+      )
+    )
+  };
+};
+
+let emit_printed_query = parts => {
   open Ast_406;
   let make_string = s => {
     Exp.constant(Parsetree.Pconst_string(s, None));
@@ -128,12 +148,7 @@ let emit_printed_query = (~strProcess=?, parts) => {
       Some(join(acc, make_fragment_query(f)))
     };
 
-  let result =
-    switch (strProcess, parts) {
-    | (Some(strProcess), [|String(s)|]) =>
-      Some(make_string(strProcess(pretty_print(s))))
-    | (_, parts) => parts |> Array.fold_left(generate_expr, None)
-    };
+  let result = parts |> Array.fold_left(generate_expr, None);
 
   switch (result) {
   | None => make_string("")
@@ -197,18 +212,25 @@ let make_printed_query = (config, document) => {
           | Some(template_literal) =>
             // if the template literal is: "graphql"
             // a string is created like this: graphql`[query]`
-            let tmp =
-              emit_printed_query(
-                ~strProcess=str => template_literal ++ "`\n" ++ str ++ "`",
-                source,
-              );
+            let contents =
+              template_literal
+              ++ "`\n"
+              ++ pretty_print(emit_printed_template_query(source))
+              ++ "`";
 
             // the only way to emit a template literal for now, using thebs.raw
             // extension
             Exp.extension((
               {txt: "bs.raw", loc: Location.none},
               PStr([
-                {pstr_desc: Pstr_eval(tmp, []), pstr_loc: Location.none},
+                {
+                  pstr_desc:
+                    Pstr_eval(
+                      Exp.constant(Parsetree.Pconst_string(contents, None)),
+                      [],
+                    ),
+                  pstr_loc: Location.none,
+                },
               ]),
             ));
           }
