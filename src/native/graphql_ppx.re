@@ -110,7 +110,7 @@ let rewrite_query = (~schema=?, ~loc, ~delim, ~query, ()) => {
         full_document: document,
         /*  the only call site of schema, make it lazy! */
         schema: Lazy.force(Read_schema.get_schema(schema)),
-        template_literal: None,
+        template_tag: None,
         records: false,
         inline: false,
       };
@@ -189,6 +189,7 @@ let () =
       },
       records: false,
       legacy: true,
+      template_tag: None,
     })
   );
 

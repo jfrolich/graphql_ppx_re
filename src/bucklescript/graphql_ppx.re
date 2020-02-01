@@ -40,6 +40,7 @@ let fmt_lex_err = err =>
   );
 
 let global_records = () => Ppx_config.records();
+let global_template_tag = () => Ppx_config.template_tag();
 
 let fmt_parse_err = err =>
   Graphql_parser.(
@@ -60,7 +61,7 @@ let make_error_expr = (loc, message) => {
 
 let rewrite_query =
     (
-      ~template_literal=?,
+      ~template_tag=?,
       ~schema=?,
       ~records=?,
       ~inline=?,
@@ -118,7 +119,11 @@ let rewrite_query =
           },
         /*  the only call site of schema, make it lazy! */
         schema: Lazy.force(Read_schema.get_schema(schema)),
-        template_literal,
+        template_tag:
+          switch (template_tag) {
+          | Some(value) => Some(value)
+          | None => global_template_tag()
+          },
       };
       switch (Validations.run_validators(config, document)) {
       | Some(errs) =>
@@ -216,12 +221,12 @@ let extract_bool_from_config = (name, config_fields) => {
   };
 };
 
-let extract_template_literal_from_config = config_fields => {
+let extract_template_tag_from_config = config_fields => {
   open Ast_406;
   open Asttypes;
   open Parsetree;
 
-  let maybe_template_literal_field =
+  let maybe_template_tag_field =
     try(
       Some(
         List.find(
@@ -241,7 +246,7 @@ let extract_template_literal_from_config = config_fields => {
     | _ => None
     };
 
-  switch (maybe_template_literal_field) {
+  switch (maybe_template_tag_field) {
   | Some((_, {pexp_desc: Pexp_ident({txt: lident})})) =>
     Some(
       Longident.flatten(lident)
@@ -283,6 +288,7 @@ let () =
       },
       records: false,
       legacy: false,
+      template_tag: None,
     })
   );
 
@@ -324,8 +330,8 @@ let mapper = (_config, _cookies) => {
                     Pmod_structure(
                       List.concat(
                         rewrite_query(
-                          ~template_literal=?
-                            extract_template_literal_from_config(fields),
+                          ~template_tag=?
+                            extract_template_tag_from_config(fields),
                           ~schema=?extract_schema_from_config(fields),
                           ~records=?extract_records_from_config(fields),
                           ~inline=?extract_inline_from_config(fields),
@@ -444,6 +450,8 @@ let mapper = (_config, _cookies) => {
                          acc,
                          List.concat(
                            rewrite_query(
+                             ~template_tag=?
+                               extract_template_tag_from_config(fields),
                              ~schema=?extract_schema_from_config(fields),
                              ~records=?extract_records_from_config(fields),
                              ~inline=?extract_inline_from_config(fields),
@@ -578,6 +586,16 @@ let args = [
       () => Ppx_config.update_config(current => {...current, records: true}),
     ),
     "Modern mode",
+  ),
+  (
+    "-template-tag",
+    Arg.String(
+      template_tag =>
+        Ppx_config.update_config(current =>
+          {...current, template_tag: Some(template_tag)}
+        ),
+    ),
+    "graphql",
   ),
 ];
 

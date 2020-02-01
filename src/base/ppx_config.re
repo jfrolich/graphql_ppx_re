@@ -12,6 +12,7 @@ type config = {
   raise_error_with_loc: 'a. (Source_pos.ast_location, string) => 'a,
   records: bool,
   legacy: bool,
+  template_tag: option(string),
 };
 
 let config_ref = ref(None);
@@ -28,6 +29,8 @@ let output_mode = () => (config_ref^ |> Option.unsafe_unwrap).output_mode;
 let apollo_mode = () => (config_ref^ |> Option.unsafe_unwrap).apollo_mode;
 
 let records = () => (config_ref^ |> Option.unsafe_unwrap).records;
+
+let template_tag = () => (config_ref^ |> Option.unsafe_unwrap).template_tag;
 
 let verbose_error_handling = () =>
   (config_ref^ |> Option.unsafe_unwrap).verbose_error_handling;

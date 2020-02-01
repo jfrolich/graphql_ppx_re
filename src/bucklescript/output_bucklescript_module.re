@@ -108,8 +108,16 @@ let emit_printed_template_query = (parts: array(Graphql_printer.t)) => {
           fun
           | Empty => acc
           | String(s) => acc ++ s
-          | FragmentNameRef(f) => acc ++ "${" ++ f ++ ".name" ++ "}"
-          | FragmentQueryRef(f) => acc ++ "${" ++ f ++ ".query" ++ "}",
+          | FragmentNameRef(f) => {
+              let name =
+                switch (String.split_on_char('.', f) |> List.rev) {
+                | [name, ..._] => name
+                | [] => assert(false)
+                };
+              acc ++ name;
+            }
+          // | FragmentQueryRef(f) => acc ++ "${" ++ f ++ ".query" ++ "}",
+          | FragmentQueryRef(f) => acc,
         "",
         parts,
       )
@@ -207,13 +215,13 @@ let make_printed_query = (config, document) => {
     | Ppx_config.String =>
       Ast_406.(
         Ast_helper.(
-          switch (config.template_literal) {
+          switch (config.template_tag) {
           | None => emit_printed_query(source)
-          | Some(template_literal) =>
+          | Some(template_tag) =>
             // if the template literal is: "graphql"
             // a string is created like this: graphql`[query]`
             let contents =
-              template_literal
+              template_tag
               ++ "`\n"
               ++ pretty_print(emit_printed_template_query(source))
               ++ "`";
