@@ -116,6 +116,10 @@ let emit_printed_template_query = (parts: array(Graphql_printer.t)) => {
                 };
               acc ++ name;
             }
+          // This is the code to make the template tag compatible with Apollo
+          // we can expose this as an option later. (we need to wait for new
+          // %raw functionality to properly do template literals. So in current
+          // state it is not possible to make it compatible with Apollo.
           // | FragmentQueryRef(f) => acc ++ "${" ++ f ++ ".query" ++ "}",
           | FragmentQueryRef(f) => acc,
         "",
