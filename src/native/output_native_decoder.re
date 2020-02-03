@@ -1,3 +1,4 @@
+open Migrate_parsetree;
 open Graphql_ppx_base;
 open Result_structure;
 open Schema;
@@ -170,6 +171,8 @@ let rec generate_decoder = config =>
     generate_record_decoder(config, conv_loc(loc), name, fields)
   | Res_object(loc, name, fields) =>
     generate_object_decoder(config, conv_loc(loc), name, fields)
+  | Res_poly_variant_selection_set(loc, name, fields) =>
+    generate_poly_variant_selection_set(config, conv_loc(loc), name, fields)
   | Res_poly_variant_union(loc, name, fragments, exhaustive) =>
     generate_poly_variant_union(
       config,
