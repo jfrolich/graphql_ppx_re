@@ -130,8 +130,6 @@ jobs:
           esy @406 b
       - name: test-bsb6
         run: |
-          esy "@402" install
-          esy "@402" b
           cd tests_bucklescript
           npm test
       - name: (only on release) Upload artifacts ${{ matrix.os }}
@@ -152,35 +150,6 @@ jobs:
         with:
           node-version: "12.x"
           registry-url: "https://registry.npmjs.org"
-
-      - name: Download linux artifacts
-        if: success()
-        uses: actions/download-artifact@master
-        with:
-          name: ubuntu-latest
-          path: binaries/linux
-
-      - name: Download macOS artifacts
-        if: success()
-        uses: actions/download-artifact@master
-        with:
-          name: macOS-latest
-          path: binaries/darwin
-
-      - name: Download windows artifacts
-        if: success()
-        uses: actions/download-artifact@master
-        with:
-          name: windows-latest
-          path: binaries/windows
-
-      - name: Move artifacts
-        if: success()
-        run: |
-          mv binaries/darwin/bin.exe bin/graphql_ppx-darwin-x64.exe
-          mv binaries/windows/bin.exe bin/graphql_ppx-win-x64.exe
-          mv binaries/linux/bin.exe bin/graphql_ppx-linux-x64.exe
-          rm -rf binaries
 
       - name: Download bsb6 linux artifacts
         if: success()
