@@ -130,6 +130,8 @@ jobs:
           esy @406 b
       - name: test-bsb6
         run: |
+          esy "@402" install
+          esy "@402" b
           cd tests_bucklescript
           npm test
       - name: (only on release) Upload artifacts ${{ matrix.os }}
