@@ -1,6 +1,5 @@
 open Jest;
 open Expect;
-open! Expect.Operators;
 
 type options = {cwd: string};
 type buffer;
@@ -9,26 +8,32 @@ type buffer;
 external execSync: (string, options) => buffer = "execSync";
 [@bs.module "fs"]
 external readdirSync: string => array(string) = "readdirSync";
+[@bs.module "os"] external platform: unit => string = "platform";
 
 [@bs.val] external dirname: string = "__dirname";
 [@bs.send] external toString: buffer => string = "toString";
 
+let win = platform() == "win32";
 let refmt =
-  execSync("esy x /usr/bin/which refmt", {cwd: ".."})
+  execSync(
+    "esy @406 x " ++ (win ? "where" : "/usr/bin/which") ++ " refmt",
+    {cwd: ".."},
+  )
   |> toString
   |> Js.String.trim;
 
 let run_ppx = (path, opts) => {
   execSync(
-    "cat "
+    (win ? "type " : "cat ")
     ++ path
     ++ " | "
     ++ refmt
     ++ " --parse re --print binary | ../_build/default/src/bucklescript_bin/bin.exe -schema ../graphql_schema.json "
     ++ opts
-    ++ " /dev/stdin /dev/stdout |  "
+    ++ (win ? " - -o -" : " /dev/stdin /dev/stdout")
+    ++ " | "
     ++ refmt
-    ++ " --parse binary --print re --interface false",
+    ++ " --parse binary --print ml --interface false",
     {cwd: "."},
   )
   |> toString;
