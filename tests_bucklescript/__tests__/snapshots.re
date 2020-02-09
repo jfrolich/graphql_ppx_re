@@ -43,7 +43,7 @@ let run_ppx = (path, opts) => {
 
 let tests = readdirSync("operations");
 
-describe("Objects (legacy)", () => {
+describe("Objects", () => {
   tests
   |> Array.map(t => {
        test(t, () =>
@@ -58,6 +58,28 @@ describe("Records", () => {
   |> Array.map(t => {
        test(t, () =>
          expect(run_ppx("operations/" ++ t, "-records")) |> toMatchSnapshot
+       )
+     })
+  |> ignore
+});
+
+describe("Records & Legacy", () => {
+  tests
+  |> Array.map(t => {
+       test(t, () =>
+         expect(run_ppx("operations/" ++ t, "-records -legacy"))
+         |> toMatchSnapshot
+       )
+     })
+  |> ignore
+});
+
+describe("Records & No definition", () => {
+  tests
+  |> Array.map(t => {
+       test(t, () =>
+         expect(run_ppx("operations/" ++ t, "-records -no-definition"))
+         |> toMatchSnapshot
        )
      })
   |> ignore
