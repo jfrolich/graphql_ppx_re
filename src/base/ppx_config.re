@@ -13,6 +13,7 @@ type config = {
   records: bool,
   legacy: bool,
   template_tag: option(string),
+  definition: bool,
 };
 
 let config_ref = ref(None);
@@ -29,7 +30,8 @@ let output_mode = () => (config_ref^ |> Option.unsafe_unwrap).output_mode;
 let apollo_mode = () => (config_ref^ |> Option.unsafe_unwrap).apollo_mode;
 
 let records = () => (config_ref^ |> Option.unsafe_unwrap).records;
-
+let legacy = () => (config_ref^ |> Option.unsafe_unwrap).legacy;
+let definition = () => (config_ref^ |> Option.unsafe_unwrap).definition;
 let template_tag = () => (config_ref^ |> Option.unsafe_unwrap).template_tag;
 
 let verbose_error_handling = () =>

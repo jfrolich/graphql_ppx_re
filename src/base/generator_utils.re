@@ -24,6 +24,8 @@ type output_config = {
   template_tag: option(string),
   records: bool,
   inline: bool,
+  legacy: bool,
+  definition: bool,
 };
 
 let filter_map = (f, l) => {

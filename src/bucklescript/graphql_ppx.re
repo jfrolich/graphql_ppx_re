@@ -42,6 +42,8 @@ let fmt_lex_err = err =>
 
 let global_records = () => Ppx_config.records();
 let global_template_tag = () => Ppx_config.template_tag();
+let global_definition = () => Ppx_config.definition();
+let legacy = () => Ppx_config.legacy();
 
 let fmt_parse_err = err =>
   Graphql_parser.(
@@ -66,6 +68,7 @@ let rewrite_query =
       ~schema=?,
       ~records=?,
       ~inline=?,
+      ~definition=?,
       ~loc,
       ~delim,
       ~query,
@@ -118,6 +121,12 @@ let rewrite_query =
           | Some(value) => value
           | None => false
           },
+        definition:
+          switch (definition) {
+          | Some(value) => value
+          | None => global_definition()
+          },
+        legacy: legacy(),
         /*  the only call site of schema, make it lazy! */
         schema: Lazy.force(Read_schema.get_schema(schema)),
         template_tag:
@@ -216,7 +225,8 @@ let extract_bool_from_config = (name, config_fields) => {
     )) =>
     switch (value) {
     | "true" => Some(true)
-    | _ => Some(false)
+    | "false" => Some(false)
+    | _ => None
     }
   | _ => None
   };
@@ -267,6 +277,7 @@ let extract_template_tag_from_config = config_fields => {
 
 let extract_records_from_config = extract_bool_from_config("records");
 let extract_inline_from_config = extract_bool_from_config("inline");
+let extract_definition_from_config = extract_bool_from_config("definition");
 
 // Default configuration
 let () =
@@ -290,6 +301,7 @@ let () =
       records: false,
       legacy: false,
       template_tag: None,
+      definition: true,
     })
   );
 
@@ -336,6 +348,7 @@ let mapper = (_config, _cookies) => {
                           ~schema=?extract_schema_from_config(fields),
                           ~records=?extract_records_from_config(fields),
                           ~inline=?extract_inline_from_config(fields),
+                          ~definition=?extract_definition_from_config(fields),
                           ~loc=conv_loc_from_ast(loc),
                           ~delim,
                           ~query,
@@ -456,6 +469,8 @@ let mapper = (_config, _cookies) => {
                              ~schema=?extract_schema_from_config(fields),
                              ~records=?extract_records_from_config(fields),
                              ~inline=?extract_inline_from_config(fields),
+                             ~definition=?
+                               extract_definition_from_config(fields),
                              ~loc=conv_loc_from_ast(loc),
                              ~delim,
                              ~query,
@@ -579,14 +594,15 @@ let args = [
     Arg.Unit(
       () => Ppx_config.update_config(current => {...current, records: false}),
     ),
-    "Legacy mode",
+    "Legacy mode (make and makeWithVariables)",
   ),
   (
-    "-modern",
+    "-no-definition",
     Arg.Unit(
-      () => Ppx_config.update_config(current => {...current, records: true}),
+      () =>
+        Ppx_config.update_config(current => {...current, definition: false}),
     ),
-    "Modern mode",
+    "Legacy mode (make and makeWithVariables)",
   ),
   (
     "-template-tag",

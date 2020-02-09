@@ -114,6 +114,8 @@ let rewrite_query = (~schema=?, ~loc, ~delim, ~query, ()) => {
         template_tag: None,
         records: false,
         inline: false,
+        legacy: false,
+        definition: true,
       };
       switch (Validations.run_validators(config, document)) {
       | Some(errs) =>
@@ -191,6 +193,7 @@ let () =
       records: false,
       legacy: true,
       template_tag: None,
+      definition: true,
     })
   );
 
