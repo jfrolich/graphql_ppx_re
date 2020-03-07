@@ -127,12 +127,9 @@ let rec generate_type = (config, path) =>
           [generate_type(config, [name, ...path], res)],
         );
 
-      let fallback_case_ty = map_case_ty(base);
       let fragment_case_tys = fragments |> List.map(map_case_ty);
 
-      Ast_helper.(
-        Typ.variant([fallback_case_ty, ...fragment_case_tys], Closed, None)
-      );
+      Ast_helper.(Typ.variant(fragment_case_tys, Closed, None));
     }
   | Res_error(loc, error) =>
     raise(Location.Error(Location.error(~loc=conv_loc(loc), error)))

@@ -315,7 +315,7 @@ let rec generate_parser = (config, path: list(string), definition) =>
       name,
       base,
       fragments,
-      [name, ...path],
+      path,
       definition,
     )
   | Res_solo_fragment_spread(loc, name, arguments) =>
@@ -533,19 +533,6 @@ and generate_poly_variant_selection_set =
 }
 and generate_poly_variant_interface =
     (config, loc, name, base, fragments, path, definition) => {
-  let map_fallback_case = ((type_name, inner)) => {
-    open Ast_helper;
-    let name_pattern = Pat.any();
-
-    Exp.variant(
-      type_name,
-      Some(
-        generate_parser(config, [type_name, ...path], definition, inner),
-      ),
-    )
-    |> Exp.case(name_pattern);
-  };
-
   let map_case = ((type_name, inner)) => {
     open Ast_helper;
     let name_pattern = Pat.constant(Pconst_string(type_name, None));
@@ -567,21 +554,17 @@ and generate_poly_variant_interface =
     );
 
   let fragment_cases = List.map(map_case, fragments);
-  let fallback_case = map_fallback_case(base);
-  let fallback_case_ty = map_case_ty(base);
-
+  let fragment_cases =
+    List.append(
+      fragment_cases,
+      [Ast_helper.(Exp.case(Pat.any(), [%expr assert(false)]))],
+    );
   let fragment_case_tys = List.map(map_case_ty, fragments);
+
   let interface_ty =
-    Ast_helper.(
-      Typ.variant([fallback_case_ty, ...fragment_case_tys], Closed, None)
-    );
+    Ast_helper.(Typ.variant(fragment_case_tys, Closed, None));
   let typename_matcher =
-    Ast_helper.(
-      Exp.match(
-        [%expr typename],
-        List.concat([fragment_cases, [fallback_case]]),
-      )
-    );
+    Ast_helper.(Exp.match([%expr typename], fragment_cases));
   [@metaloc loc]
   (
     switch%expr (Js.Json.decodeObject(value)) {
